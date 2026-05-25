@@ -19,6 +19,7 @@ import {
   type ChangeEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  useEffect,
   useState,
 } from "react";
 import { mockReviewResponse } from "@/data/mock-review-response";
@@ -46,12 +47,17 @@ import type {
   VerificationStatus,
 } from "@/types/sidus";
 
-type PageId = "context" | "review" | "suggestions" | "final";
+type PageId = "context" | "research" | "review" | "suggestions" | "final";
 type DrawerItem =
   | { kind: "suggestion"; item: Suggestion }
   | { kind: "audit"; item: EvidenceAuditItem }
   | null;
 type CompanyResearchStatus = "idle" | "pending" | "accepted";
+type CompanyResearchProgressStep = {
+  label: string;
+  detail: string;
+  searchFocus: string;
+};
 
 const criteria: ReviewCriterion[] = [
   "logical_structure",
@@ -59,6 +65,34 @@ const criteria: ReviewCriterion[] = [
   "company_understanding_and_fit",
   "expression_quality",
   "authenticity_and_ai_likeness",
+];
+
+const companyResearchProgressSteps: CompanyResearchProgressStep[] = [
+  {
+    label: "指定URLを確認中",
+    detail: "入力された公式・日経会社情報・公的情報URLを最優先で読んでいます。",
+    searchFocus: "ユーザー指定URL / 公式会社概要",
+  },
+  {
+    label: "信頼DBを探索中",
+    detail: "日経会社情報、法人番号、gBizINFO、EDINETを優先して探しています。",
+    searchFocus: "日経会社情報 / 法人番号 / gBizINFO / EDINET",
+  },
+  {
+    label: "候補URLを検証中",
+    detail: "子会社、就活媒体、自動生成ページなどが混ざらないか確認しています。",
+    searchFocus: "対象企業そのもののページ判定",
+  },
+  {
+    label: "本文を取得中",
+    detail: "取得できたページからESレビューに使える範囲だけを抽出しています。",
+    searchFocus: "出典本文 / 会社概要 / 採用情報",
+  },
+  {
+    label: "レポート生成中",
+    detail: "確認済みソースだけを使い、未確認情報は分けて整理しています。",
+    searchFocus: "事業説明 / ES論点 / unknowns",
+  },
 ];
 
 const minNavWidth = 224;
@@ -71,8 +105,9 @@ const navItems: {
   description: string;
   icon: LucideIcon;
 }[] = [
-  { id: "context", label: "前提情報", description: "ESと根拠情報", icon: FileText },
-  { id: "review", label: "評価", description: "全体評価と監査", icon: SearchCheck },
+  { id: "context", label: "前提情報", description: "ESと本人文脈", icon: FileText },
+  { id: "research", label: "企業調査", description: "出典と企業理解", icon: ShieldCheck },
+  { id: "review", label: "レビュー", description: "採点と根拠確認", icon: SearchCheck },
   { id: "suggestions", label: "提案", description: "提案と差分", icon: MessageSquare },
   { id: "final", label: "最終稿", description: "編集と出力", icon: PenLine },
 ];
@@ -95,6 +130,34 @@ const blankUserContext: UserContext = {
   obOgMemo: "",
   additionalNotes: "",
 };
+
+const companyReferenceFields = [
+  {
+    id: "official-company",
+    title: "公式会社概要URL",
+    label: "公式会社概要",
+  },
+  {
+    id: "official-recruiting-ir",
+    title: "公式採用・IR URL",
+    label: "公式採用 / IR",
+  },
+  {
+    id: "nikkei-company-info",
+    title: "日経会社情報URL",
+    label: "日経会社情報",
+  },
+  {
+    id: "public-disclosure",
+    title: "公的情報URL",
+    label: "法人番号 / gBizINFO / EDINET",
+  },
+  {
+    id: "extra-reference",
+    title: "その他参考URL",
+    label: "その他参考URL",
+  },
+] as const;
 
 function stripTrailingEllipsis(value: string) {
   return value.replace(/(\.\.\.|…)\s*$/u, "").trim();
@@ -229,7 +292,7 @@ function getSourceTypeLabel(sourceType: CompanyResearchSource["sourceType"]) {
     financial_disclosure: "公式IR・開示",
     major_media: "主要メディア",
     user_memo: "本人メモ",
-    model_knowledge: "AI推定",
+    model_knowledge: "未検証情報",
     url: "参考URL",
   };
   return labels[sourceType];
@@ -312,10 +375,42 @@ function getSourceQualityLabel(value: string) {
     company_provided: "企業提供",
     user_provided: "本人入力",
     third_party: "第三者情報",
-    model_knowledge: "AI推定",
+    model_knowledge: "未検証情報",
     unknown: "未確認",
   };
   return labels[value] ?? value;
+}
+
+function getSuggestionTypeLabel(type: Suggestion["type"]) {
+  const labels: Record<Suggestion["type"], string> = {
+    logic: "構成",
+    specificity: "具体性",
+    company_fit: "企業適合",
+    expression: "表現",
+    authenticity: "本人らしさ",
+    length: "文字数",
+  };
+  return labels[type];
+}
+
+function getSuggestionSeverityLabel(severity: Suggestion["severity"]) {
+  const labels: Record<Suggestion["severity"], string> = {
+    high: "優先",
+    medium: "通常",
+    low: "軽微",
+  };
+  return labels[severity];
+}
+
+function getSuggestionStatusLabel(status: SuggestionStatus) {
+  const labels: Record<SuggestionStatus, string> = {
+    unreviewed: "未確認",
+    accepted: "採用済み",
+    rejected: "却下",
+    edited: "編集反映",
+    revised: "再検討済み",
+  };
+  return labels[status];
 }
 
 function formatCompanyResearchForReview(research: CompanyResearchResponse) {
@@ -450,6 +545,8 @@ export default function Home() {
   const [companyResearchStatus, setCompanyResearchStatus] =
     useState<CompanyResearchStatus>("idle");
   const [isResearchingCompany, setIsResearchingCompany] = useState(false);
+  const [companyResearchProgressIndex, setCompanyResearchProgressIndex] =
+    useState(0);
   const [companyResearchError, setCompanyResearchError] = useState<string | null>(
     null,
   );
@@ -462,6 +559,21 @@ export default function Home() {
   const acceptedCount = Object.values(suggestionStatuses).filter(
     (status) => status === "accepted" || status === "edited",
   ).length;
+
+  useEffect(() => {
+    if (!isResearchingCompany) {
+      setCompanyResearchProgressIndex(0);
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setCompanyResearchProgressIndex((current) =>
+        Math.min(current + 1, companyResearchProgressSteps.length - 1),
+      );
+    }, 4500);
+
+    return () => window.clearInterval(timer);
+  }, [isResearchingCompany]);
 
   function loadSample(sample: SampleEssay) {
     setSelectedSampleId(sample.id);
@@ -519,11 +631,12 @@ export default function Home() {
 
   async function runCompanyResearch() {
     if (!applicationTarget.companyName.trim()) {
-      setCompanyResearchError("企業名を入力してからAI調査を実行してください。");
+      setCompanyResearchError("企業名を入力してから調査を実行してください。");
       return;
     }
 
     setCompanyResearchError(null);
+    setCompanyResearchProgressIndex(0);
     setIsResearchingCompany(true);
 
     try {
@@ -639,7 +752,7 @@ export default function Home() {
 
   async function runReview() {
     if (!canRunReview) {
-      setReviewError("ES本文を入力してから評価を生成してください。");
+      setReviewError("ES本文を入力してからレビューを実行してください。");
       setPage("context");
       return;
     }
@@ -871,9 +984,21 @@ export default function Home() {
                   targetCount={targetCount}
                   setTargetCount={setTargetCount}
                   onLoadSample={loadSample}
+                  companyResearchStatus={companyResearchStatus}
+                  onOpenCompanyResearch={() => setPage("research")}
+                />
+              )}
+
+              {page === "research" && (
+                <CompanyResearchPage
+                  applicationTarget={applicationTarget}
+                  setApplicationTarget={setApplicationTarget}
                   companyResearch={companyResearch}
                   companyResearchStatus={companyResearchStatus}
                   isResearchingCompany={isResearchingCompany}
+                  companyResearchProgressStep={
+                    companyResearchProgressSteps[companyResearchProgressIndex]
+                  }
                   companyResearchError={companyResearchError}
                   onRunCompanyResearch={runCompanyResearch}
                   onAcceptCompanyResearch={acceptCompanyResearch}
@@ -1017,14 +1142,14 @@ function AppNav({
             >
               <SearchCheck size={14} />
               {isReviewing
-                ? "評価中"
+                ? "レビュー中"
                 : canRunReview
-                  ? "評価を生成"
+                  ? "レビューを実行"
                   : "ES本文を入力"}
             </button>
             {!canRunReview && (
               <p className="mt-2 text-xs leading-5 text-[#f7d58a]">
-                新しい校正では、まず中央のEssay欄にES本文を貼ってください。
+                新しい校正では、まず中央のES本文欄に本文を貼ってください。
               </p>
             )}
           </>
@@ -1045,7 +1170,7 @@ function AppNav({
               onClick={onRunReview}
               disabled={isReviewing || !canRunReview}
               className="grid size-9 place-items-center rounded-md bg-[#d8e8ff] text-[#0b1220] hover:bg-white disabled:cursor-not-allowed disabled:bg-[#64748b] disabled:text-[#dbe5ef]"
-              title="評価を生成"
+              title="レビューを実行"
             >
               <SearchCheck size={15} />
             </button>
@@ -1200,20 +1325,50 @@ function TopBar({
   targetCount: number;
 }) {
   const title = navItems.find((item) => item.id === page)?.label ?? "Sidus";
+  const remainingCharacters = targetCount - characterCount;
+  const lengthLabel =
+    targetCount > 0
+      ? remainingCharacters >= 0
+        ? `あと${remainingCharacters}字`
+        : `${Math.abs(remainingCharacters)}字超過`
+      : `${characterCount}字`;
+  const reviewLabel = reviewResponse
+    ? `${renderStars(reviewResponse.summary.starRating)} ${reviewResponse.summary.headline}`
+    : "レビュー前";
+
   return (
-    <header className="flex items-center justify-between border-b border-[#e4e4e7] bg-white px-5">
-      <div>
-        <p className="text-[11px] font-semibold text-[#71717a]">
+    <header className="flex min-h-16 items-center justify-between gap-4 border-b border-[#e4e4e7] bg-white px-5">
+      <div className="min-w-0">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-[#71717a]">
           {title}
         </p>
-        <h1 className="mt-1 text-base font-semibold">
-          {companyName || "応募先未設定"} / {position || "職種未設定"}
+        <h1 className="mt-1 truncate text-base font-semibold">
+          {companyName || "応募先未設定"}
+          {position ? ` / ${position}` : ""}
         </h1>
       </div>
-      <div className="flex items-center gap-2">
-        <Status label="評価" value={reviewResponse ? "完了" : "未実行"} />
-        <Status label="目安" value={reviewResponse ? renderStars(reviewResponse.summary.starRating) : "-----"} />
-        <Status label="文字数" value={`${characterCount}/${targetCount}`} />
+      <div className="hidden min-w-0 items-center gap-3 text-xs text-[#52525b] md:flex">
+        <span
+          className={`rounded-md px-2.5 py-1 font-semibold ${
+            reviewResponse
+              ? "bg-[#e7f5ea] text-[#14532d]"
+              : "bg-[#f4f4f5] text-[#52525b]"
+          }`}
+        >
+          {reviewLabel}
+        </span>
+        <span className="rounded-md bg-[#f8fafc] px-2.5 py-1 font-semibold text-[#334155]">
+          {characterCount}/{targetCount}字
+        </span>
+        <span
+          className={`rounded-md px-2.5 py-1 font-semibold ${
+            remainingCharacters >= 0
+              ? "bg-[#f8fafc] text-[#334155]"
+              : "bg-[#fff8e1] text-[#7c4a03]"
+          }`}
+        >
+          {lengthLabel}
+        </span>
       </div>
     </header>
   );
@@ -1237,13 +1392,8 @@ function ContextPage({
   targetCount,
   setTargetCount,
   onLoadSample,
-  companyResearch,
   companyResearchStatus,
-  isResearchingCompany,
-  companyResearchError,
-  onRunCompanyResearch,
-  onAcceptCompanyResearch,
-  onDiscardCompanyResearch,
+  onOpenCompanyResearch,
 }: {
   selectedSampleId: string;
   essayText: string;
@@ -1262,16 +1412,9 @@ function ContextPage({
   targetCount: number;
   setTargetCount: (count: number) => void;
   onLoadSample: (sample: SampleEssay) => void;
-  companyResearch: CompanyResearchResponse | null;
   companyResearchStatus: CompanyResearchStatus;
-  isResearchingCompany: boolean;
-  companyResearchError: string | null;
-  onRunCompanyResearch: () => void;
-  onAcceptCompanyResearch: () => void;
-  onDiscardCompanyResearch: () => void;
+  onOpenCompanyResearch: () => void;
 }) {
-  const firstReference = applicationTarget.referenceUrls[0];
-
   function updateTarget<K extends keyof ApplicationTarget>(
     key: K,
     value: ApplicationTarget[K],
@@ -1289,14 +1432,14 @@ function ContextPage({
   return (
     <PageBody>
       <PageHeader
-        label="Context"
+        label="前提情報"
         title="レビューの前提情報"
         description="ES本文、応募先、根拠ソース、本人文脈をここで管理します。"
       />
 
       {essayText.trim().length === 0 && (
         <div className="mb-4 rounded-md border border-[#f0c36a] bg-[#fff8e1] px-4 py-3 text-sm leading-6 text-[#7c4a03]">
-          新しいES校正を始めました。まずEssay欄にES本文を貼ると、左のReviewボタンが有効になります。
+          新しいES校正を始めました。まずES本文欄に本文を貼ると、左のレビューボタンが有効になります。
         </div>
       )}
 
@@ -1355,44 +1498,14 @@ function ContextPage({
               <Field label="企業名" value={applicationTarget.companyName} onChange={(value) => updateTarget("companyName", value)} />
               <Field label="職種" value={applicationTarget.position} onChange={(value) => updateTarget("position", value)} />
               <TextArea label="企業メモ" value={applicationTarget.companyMemo} onChange={(value) => updateTarget("companyMemo", value)} />
-              <Field
-                label="参考URL"
-                value={firstReference?.url ?? ""}
-                onChange={(value) =>
-                  updateTarget("referenceUrls", [
-                    {
-                      id: firstReference?.id ?? "source-1",
-                      title: firstReference?.title ?? "Reference URL",
-                      url: value,
-                      memo: firstReference?.memo ?? "",
-                      sourceType: "url",
-                    },
-                    ...applicationTarget.referenceUrls.slice(1),
-                  ])
-                }
-              />
               <button
                 type="button"
-                onClick={onRunCompanyResearch}
-                disabled={isResearchingCompany || !applicationTarget.companyName.trim()}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white hover:bg-[#27272a] disabled:cursor-not-allowed disabled:bg-[#8b948f]"
+                onClick={onOpenCompanyResearch}
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white hover:bg-[#27272a]"
               >
-                <SearchCheck size={14} />
-                {isResearchingCompany ? "企業情報を調査中" : "企業情報をAI調査"}
+                <ShieldCheck size={14} />
+                企業調査ページへ
               </button>
-              {companyResearchError && (
-                <p className="rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]">
-                  {companyResearchError}
-                </p>
-              )}
-              {companyResearch && (
-                <CompanyResearchPanel
-                  research={companyResearch}
-                  status={companyResearchStatus}
-                  onAccept={onAcceptCompanyResearch}
-                  onDiscard={onDiscardCompanyResearch}
-                />
-              )}
             </div>
           </section>
 
@@ -1406,6 +1519,192 @@ function ContextPage({
             </div>
           </section>
         </aside>
+      </div>
+    </PageBody>
+  );
+}
+
+function CompanyResearchPage({
+  applicationTarget,
+  setApplicationTarget,
+  companyResearch,
+  companyResearchStatus,
+  isResearchingCompany,
+  companyResearchProgressStep,
+  companyResearchError,
+  onRunCompanyResearch,
+  onAcceptCompanyResearch,
+  onDiscardCompanyResearch,
+}: {
+  applicationTarget: ApplicationTarget;
+  setApplicationTarget: (target: ApplicationTarget) => void;
+  companyResearch: CompanyResearchResponse | null;
+  companyResearchStatus: CompanyResearchStatus;
+  isResearchingCompany: boolean;
+  companyResearchProgressStep: CompanyResearchProgressStep;
+  companyResearchError: string | null;
+  onRunCompanyResearch: () => void;
+  onAcceptCompanyResearch: () => void;
+  onDiscardCompanyResearch: () => void;
+}) {
+  function updateTarget<K extends keyof ApplicationTarget>(
+    key: K,
+    value: ApplicationTarget[K],
+  ) {
+    setApplicationTarget({ ...applicationTarget, [key]: value });
+  }
+
+  function getReferenceUrl(fieldId: string) {
+    const fixedSource = applicationTarget.referenceUrls.find(
+      (source) => source.id === fieldId,
+    );
+    if (fixedSource?.url) return fixedSource.url;
+
+    if (fieldId !== "extra-reference") return "";
+
+    return (
+      applicationTarget.referenceUrls.find(
+        (source) =>
+          source.url &&
+          !companyReferenceFields.some((field) => field.id === source.id),
+      )?.url ?? ""
+    );
+  }
+
+  function updateReferenceUrl(fieldId: string, title: string, value: string) {
+    const existingExtra =
+      fieldId === "extra-reference"
+        ? applicationTarget.referenceUrls.find(
+            (source) =>
+              source.url &&
+              !companyReferenceFields.some((field) => field.id === source.id),
+          )
+        : null;
+    const targetId = existingExtra?.id ?? fieldId;
+    const nextReferences = applicationTarget.referenceUrls.filter(
+      (source) => source.id !== targetId,
+    );
+
+    if (value.trim()) {
+      nextReferences.push({
+        id: targetId,
+        title,
+        url: value,
+        memo: "",
+        sourceType: "url",
+      });
+    }
+
+    updateTarget("referenceUrls", nextReferences);
+  }
+
+  return (
+    <PageBody wide>
+      <PageHeader
+        label="企業調査"
+        title="企業調査"
+        description="参照元URLを指定し、公式・日経会社情報・公的情報を優先してESレビューの前提を作ります。"
+      />
+
+      <div className="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
+        <section className="space-y-4">
+          <SectionHeader title="調査条件" icon={ShieldCheck} />
+          <div className="space-y-3 rounded-md border border-[#e4e4e7] bg-white p-4">
+            <CompanyIdentityCard
+              applicationTarget={applicationTarget}
+              status={companyResearchStatus}
+            />
+            <Field
+              label="業界"
+              value={applicationTarget.industry}
+              onChange={(value) => updateTarget("industry", value)}
+            />
+            <Field
+              label="企業名"
+              value={applicationTarget.companyName}
+              onChange={(value) => updateTarget("companyName", value)}
+            />
+            <Field
+              label="職種"
+              value={applicationTarget.position}
+              onChange={(value) => updateTarget("position", value)}
+            />
+            <TextArea
+              label="企業メモ"
+              value={applicationTarget.companyMemo}
+              onChange={(value) => updateTarget("companyMemo", value)}
+            />
+          </div>
+
+          <div className="rounded-md border border-[#e4e4e7] bg-[#fafafa] p-4">
+            <p className="text-sm font-semibold text-[#18181b]">参照元URL</p>
+            <p className="mt-1 text-xs leading-5 text-[#71717a]">
+              ここに入れたURLを最優先で読みます。空欄の場合は信頼DBと公式URLを探索します。
+            </p>
+            <div className="mt-4 space-y-3">
+              {companyReferenceFields.map((field) => (
+                <Field
+                  key={field.id}
+                  label={field.label}
+                  value={getReferenceUrl(field.id)}
+                  onChange={(value) =>
+                    updateReferenceUrl(field.id, field.title, value)
+                  }
+                />
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="min-w-0 space-y-4">
+          <div className="rounded-md border border-[#e4e4e7] bg-white p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <SectionHeader title="調査実行" icon={SearchCheck} />
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-[#71717a]">
+                  指定URL、日経会社情報、公的情報、公式サイトの順に確認します。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onRunCompanyResearch}
+                disabled={isResearchingCompany || !applicationTarget.companyName.trim()}
+                className="flex items-center justify-center gap-2 rounded-md bg-[#18181b] px-4 py-2 text-sm font-semibold text-white hover:bg-[#27272a] disabled:cursor-not-allowed disabled:bg-[#8b948f]"
+              >
+                <SearchCheck size={14} />
+                {isResearchingCompany ? "企業情報を調査中" : "企業情報を調査"}
+              </button>
+            </div>
+
+            {isResearchingCompany && (
+              <div className="mt-4">
+                <CompanyResearchProgress
+                  companyName={applicationTarget.companyName}
+                  step={companyResearchProgressStep}
+                />
+              </div>
+            )}
+
+            {companyResearchError && (
+              <p className="mt-4 rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]">
+                {companyResearchError}
+              </p>
+            )}
+          </div>
+
+          {companyResearch ? (
+            <CompanyResearchPanel
+              research={companyResearch}
+              status={companyResearchStatus}
+              onAccept={onAcceptCompanyResearch}
+              onDiscard={onDiscardCompanyResearch}
+            />
+          ) : (
+            <div className="rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-6 text-sm leading-6 text-[#475569]">
+              企業調査を実行すると、固定欄、出典、未確認事項、ESレビューで見る観点をここに表示します。
+            </div>
+          )}
+        </section>
       </div>
     </PageBody>
   );
@@ -1429,8 +1728,8 @@ function DocumentIntakePanel({
   onAcceptExtractedFullText: () => void;
 }) {
   const sourceLabel: Record<EssaySourceType, string> = {
-    sample: "Sample",
-    text: "Text",
+    sample: "サンプル",
+    text: "本文",
     markdown: "Markdown",
     pdf: "PDF",
   };
@@ -1449,7 +1748,7 @@ function DocumentIntakePanel({
             原稿ファイル
           </p>
           <p className="mt-1 text-sm text-[#27272a]">
-            PDF / Markdown / Textを読み込み、抽出結果を確認してからES本文に採用します。
+            PDF / Markdown / テキストを読み込み、抽出結果を確認してからES本文に採用します。
           </p>
         </div>
         <span className="rounded-full border border-[#d4d4d8] bg-white px-3 py-1 text-xs font-semibold text-[#27272a]">
@@ -1460,7 +1759,7 @@ function DocumentIntakePanel({
       <label className="mt-3 flex cursor-pointer items-center justify-center rounded-md border border-dashed border-[#a1a1aa] bg-white px-3 py-3 text-sm font-semibold text-[#18181b] hover:border-[#18181b] hover:bg-[#f4faf6]">
         {isExtractingDocument
           ? "原稿を読み込み中"
-          : "PDF / Markdown / Text原稿を選択"}
+          : "PDF / Markdown / テキスト原稿を選択"}
         <input
           aria-label="ES原稿ファイル"
           type="file"
@@ -1480,13 +1779,13 @@ function DocumentIntakePanel({
       {documentExtraction && (
         <div className="mt-4 space-y-3">
           <div className="grid gap-2 text-xs text-[#71717a] sm:grid-cols-3">
-            <Metric label="File" value={documentExtraction.fileName} />
+            <Metric label="ファイル" value={documentExtraction.fileName} />
             <Metric
-              label="Extracted"
-              value={`${documentExtraction.cleanedText.length} chars`}
+              label="抽出文字数"
+              value={`${documentExtraction.cleanedText.length}字`}
             />
             <Metric
-              label="Pages"
+              label="ページ"
               value={
                 documentExtraction.pageCount
                   ? `${documentExtraction.pageCount}`
@@ -1636,6 +1935,33 @@ function CompanyLogo({
   );
 }
 
+function CompanyResearchProgress({
+  companyName,
+  step,
+}: {
+  companyName: string;
+  step: CompanyResearchProgressStep;
+}) {
+  return (
+    <div className="rounded-md border border-[#dbeafe] bg-[#f8fbff] px-3 py-3">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full border border-[#93c5fd] bg-white">
+          <span className="size-2 animate-pulse rounded-full bg-[#2563eb]" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold text-[#1d4ed8]">
+            {companyName} / {step.label}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-[#334155]">{step.detail}</p>
+          <p className="mt-2 rounded-md bg-white px-2 py-1 text-[11px] font-semibold text-[#475569]">
+            Search: {step.searchFocus}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SourceIcon({ url, title }: { url?: string; title: string }) {
   const faviconUrl = getFaviconUrl(url);
   const fallback = title.trim().slice(0, 1).toUpperCase() || "S";
@@ -1688,121 +2014,176 @@ function CompanyResearchPanel({
   const identity = research.identitySummary;
   const primaryCompanyUrl = getPrimaryCompanyUrl(research);
   const sourceLookup = createCompanySourceLookup(research);
+  const directEvidence = research.evidenceDigest.filter(
+    (item) => item.useRecommendation === "direct_use",
+  );
+  const leadEvidence =
+    directEvidence.length > 0
+      ? directEvidence.slice(0, 2)
+      : research.evidenceDigest.slice(0, 2);
+  const sourceSignals = [
+    ["取得", fetchedCount],
+    ["失敗", failedCount],
+    ["一次情報", primaryCount],
+    ["公的", research.sourceCoverage.publicRegistry],
+    ["公式", research.sourceCoverage.official],
+    ["注意", cautionCount],
+    ["未確認", research.unknowns.length],
+  ] as const;
 
   return (
     <div
-      className={`rounded-md border p-3 ${
+      className={`rounded-md border ${
         isAccepted
           ? "border-[#bbf7d0] bg-[#f7fdf9]"
           : "border-[#e4e4e7] bg-[#fafafa]"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold">企業情報レポート</p>
-          <p className="mt-1 text-xs text-[#71717a]">
-            {getResearchAccessModeLabel(research.accessMode)} / 信頼度:{" "}
-            {getConfidenceLabel(research.confidence)}
-          </p>
+      <div className="border-b border-[#e4e4e7] bg-white px-4 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-sm font-semibold">企業情報レポート</p>
+              <span
+                className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                  isAccepted
+                    ? "bg-[#18181b] text-white"
+                    : "bg-[#e7f5ea] text-[#18181b]"
+                }`}
+              >
+                {isAccepted ? "採用済み" : "確認待ち"}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-[#71717a]">
+              {getResearchAccessModeLabel(research.accessMode)} / 信頼度:{" "}
+              {getConfidenceLabel(research.confidence)}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onAccept}
+              disabled={isAccepted}
+              className="flex items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-xs font-semibold text-white hover:bg-[#27272a] disabled:cursor-not-allowed disabled:bg-[#8b948f]"
+            >
+              <Check size={13} />
+              {isAccepted ? "採用済み" : "レビューに採用"}
+            </button>
+            <button
+              type="button"
+              onClick={onDiscard}
+              className="flex items-center justify-center gap-2 rounded-md border border-[#e4e4e7] bg-white px-3 py-2 text-xs font-semibold hover:bg-[#f4f4f5]"
+            >
+              <X size={13} />
+              破棄
+            </button>
+          </div>
         </div>
-        <span
-          className={`rounded-md px-2 py-1 text-[11px] font-semibold ${
-            isAccepted
-              ? "bg-[#18181b] text-white"
-              : "bg-[#e7f5ea] text-[#18181b]"
-          }`}
-        >
-          {isAccepted ? "採用済み" : "未採用"}
-        </span>
-      </div>
 
-      <div className="mt-3">
-        <CompanyIdentityCard
-          applicationTarget={{
-            industry: research.industry,
-            companyName: research.companyName,
-            position: research.position,
-            companyMemo: research.companyUnderstandingMemo,
-            referenceUrls: primaryCompanyUrl
-              ? [
-                  {
-                    id: "primary-company-identity",
-                    title: "企業公式サイト",
-                    url: primaryCompanyUrl,
-                    sourceType: "url" as const,
-                  },
-                ]
-              : [],
-          }}
-          status={status}
-          compact
-          identityUrl={primaryCompanyUrl}
-        />
-      </div>
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+          <div className="space-y-3">
+            <CompanyIdentityCard
+              applicationTarget={{
+                industry: research.industry,
+                companyName: research.companyName,
+                position: research.position,
+                companyMemo: research.companyUnderstandingMemo,
+                referenceUrls: primaryCompanyUrl
+                  ? [
+                      {
+                        id: "primary-company-identity",
+                        title: "企業公式サイト",
+                        url: primaryCompanyUrl,
+                        sourceType: "url" as const,
+                      },
+                    ]
+                  : [],
+              }}
+              status={status}
+              compact
+              identityUrl={primaryCompanyUrl}
+            />
+            <p className="text-sm leading-6 text-[#3f3f46]">
+              {research.companyUnderstandingMemo}
+            </p>
+          </div>
 
-      <p className="mt-3 text-xs leading-5 text-[#3f3f46]">
-        {research.companyUnderstandingMemo}
-      </p>
-
-      <div className="mt-3 grid grid-cols-3 gap-2 lg:grid-cols-7">
-        <Metric label="取得" value={String(fetchedCount)} />
-        <Metric label="失敗" value={String(failedCount)} />
-        <Metric label="一次情報" value={String(primaryCount)} />
-        <Metric label="公的情報" value={String(research.sourceCoverage.publicRegistry)} />
-        <Metric label="公式" value={String(research.sourceCoverage.official)} />
-        <Metric label="注意情報" value={String(cautionCount)} />
-        <Metric label="未確認" value={String(research.unknowns.length)} />
-      </div>
-
-      <div className="mt-3 grid gap-2 md:grid-cols-2">
-        <ResearchInfo label="正式名称" value={identity.legalName} />
-        <ResearchInfo label="管轄" value={identity.jurisdiction} />
-        <ResearchInfo label="法人種別" value={identity.entityKind} />
-        <ResearchInfo label="法人番号" value={identity.corporateNumber} />
-        <ResearchInfo label="所在地" value={identity.headquarters} />
-        <ResearchInfo label="業種分類" value={identity.industryClassification} />
-        <ResearchInfo label="証券コード" value={identity.securitiesCode} />
-        <ResearchInfo label="上場市場" value={identity.listingMarket} />
+          <div className="rounded-md border border-[#e4e4e7] bg-[#fafafa] px-3 py-3">
+            <p className="text-xs font-semibold text-[#71717a]">出典の状態</p>
+            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+              {sourceSignals.map(([label, value]) => (
+                <div key={label} className="flex items-center justify-between gap-3 border-b border-[#ececef] pb-1 last:border-b-0">
+                  <span className="text-[11px] text-[#71717a]">{label}</span>
+                  <span className="text-sm font-semibold text-[#18181b]">{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
 
       {!isAccepted && (
-        <p className="mt-3 rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]">
+        <p className="mx-4 mt-4 rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]">
           この企業理解はまだESレビューに採用されていません。内容を確認してから採用してください。
         </p>
       )}
 
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={onAccept}
-          disabled={isAccepted}
-          className="flex items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-xs font-semibold text-white hover:bg-[#27272a] disabled:cursor-not-allowed disabled:bg-[#8b948f]"
-        >
-          <Check size={13} />
-          {isAccepted ? "採用済み" : "この企業理解を採用"}
-        </button>
-        <button
-          type="button"
-          onClick={onDiscard}
-          className="flex items-center justify-center gap-2 rounded-md border border-[#e4e4e7] bg-white px-3 py-2 text-xs font-semibold hover:bg-[#f4f4f5]"
-        >
-          <X size={13} />
-          破棄
-        </button>
-      </div>
-
-      <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        <ResearchSection title="事業説明">
-          {research.businessSummary.map((item) => (
-            <p
-              key={item}
-              className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs leading-5"
-            >
-              {item}
-            </p>
-          ))}
+      <div className="grid gap-4 px-4 py-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <ResearchSection title="ESレビューで見る観点">
+          <div className="space-y-2">
+            {research.esReviewFocus.map((focus) => (
+              <p
+                key={focus}
+                className="border-l-2 border-[#18181b] bg-white px-3 py-2 text-sm leading-6 text-[#1f2937]"
+              >
+                {focus}
+              </p>
+            ))}
+          </div>
         </ResearchSection>
 
+        <ResearchSection title="出典にもとづく使える材料">
+          <div className="space-y-2">
+            {leadEvidence.map((item) => (
+              <EvidenceDigestCard
+                key={`${item.category}-${item.title}`}
+                item={item}
+                sourceLookup={sourceLookup}
+              />
+            ))}
+          </div>
+        </ResearchSection>
+      </div>
+
+      <div className="grid gap-4 border-t border-[#e4e4e7] px-4 py-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <ResearchSection title="法人・基本情報">
+          <div className="grid gap-x-4 gap-y-2 md:grid-cols-2">
+            <ResearchInfo label="正式名称" value={identity.legalName} />
+            <ResearchInfo label="管轄" value={identity.jurisdiction} />
+            <ResearchInfo label="法人種別" value={identity.entityKind} />
+            <ResearchInfo label="法人番号" value={identity.corporateNumber} />
+            <ResearchInfo label="所在地" value={identity.headquarters} />
+            <ResearchInfo label="業種分類" value={identity.industryClassification} />
+            <ResearchInfo label="証券コード" value={identity.securitiesCode} />
+            <ResearchInfo label="上場市場" value={identity.listingMarket} />
+          </div>
+        </ResearchSection>
+
+        <ResearchSection title="事業説明">
+          <div className="space-y-2">
+            {research.businessSummary.map((item) => (
+              <p
+                key={item}
+                className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs leading-5"
+              >
+                {item}
+              </p>
+            ))}
+          </div>
+        </ResearchSection>
+      </div>
+
+      <div className="grid gap-4 px-4 pb-4 xl:grid-cols-2">
         <ResearchSection title="財務情報">
           {research.financialHighlights.length === 0 ? (
             <p className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs text-[#71717a]">
@@ -1831,98 +2212,56 @@ function CompanyResearchPanel({
             ))
           )}
         </ResearchSection>
-      </div>
 
-      <ResearchSection title="最近の動向" className="mt-4">
-        {research.recentDevelopments.length === 0 ? (
-          <p className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs text-[#71717a]">
-            最近の動向は未確認です。
-          </p>
-        ) : (
-          research.recentDevelopments.map((item) => (
-            <div
-              key={`${item.title}-${item.date}`}
-              className="rounded-md border border-[#ececef] bg-white px-3 py-2"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-xs font-semibold">{item.title}</p>
-                    <UseRecommendationBadge value={item.esUseRecommendation} />
+        <ResearchSection title="最近の動向">
+          {research.recentDevelopments.length === 0 ? (
+            <p className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs text-[#71717a]">
+              最近の動向は未確認です。
+            </p>
+          ) : (
+            research.recentDevelopments.map((item) => (
+              <div
+                key={`${item.title}-${item.date}`}
+                className="rounded-md border border-[#ececef] bg-white px-3 py-2"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-xs font-semibold">{item.title}</p>
+                      <UseRecommendationBadge value={item.esUseRecommendation} />
+                    </div>
+                    <p className="mt-1 text-[11px] text-[#71717a]">
+                      {item.date || "日付未確認"} /{" "}
+                      {getSourceTypeLabel(item.sourceType)}
+                    </p>
                   </div>
-                  <p className="mt-1 text-[11px] text-[#71717a]">
-                    {item.date || "日付未確認"} /{" "}
-                    {getSourceTypeLabel(item.sourceType)}
-                  </p>
+                  {item.url && (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold underline"
+                    >
+                      <Link2 size={12} />
+                      出典を開く
+                    </a>
+                  )}
                 </div>
-                {item.url && (
-                  <a
-                    href={item.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold underline"
-                  >
-                    <Link2 size={12} />
-                    出典を開く
-                  </a>
+                <p className="mt-2 text-xs leading-5 text-[#3f3f46]">
+                  {item.summary}
+                </p>
+                {item.riskNote && (
+                  <p className="mt-2 rounded-md bg-[#fff8e1] px-2 py-1 text-[11px] leading-5 text-[#7c4a03]">
+                    {item.riskNote}
+                  </p>
                 )}
               </div>
-              <p className="mt-2 text-xs leading-5 text-[#3f3f46]">
-                {item.summary}
-              </p>
-              {item.riskNote && (
-                <p className="mt-2 rounded-md bg-[#fff8e1] px-2 py-1 text-[11px] leading-5 text-[#7c4a03]">
-                  {item.riskNote}
-                </p>
-              )}
-            </div>
-          ))
-        )}
-      </ResearchSection>
-
-      <ResearchSection title="出典にもとづくES論点" className="mt-4">
-        {research.evidenceDigest.map((item) => (
-          <div
-            key={`${item.category}-${item.title}`}
-            className="rounded-md border border-[#ececef] bg-white px-3 py-2"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-md bg-[#f4f4f5] px-2 py-0.5 text-[10px] font-semibold text-[#52525b]">
-                {getEvidenceCategoryLabel(item.category)}
-              </span>
-              <UseRecommendationBadge value={item.useRecommendation} />
-              <p className="text-xs font-semibold">{item.title}</p>
-            </div>
-            <p className="mt-2 text-xs leading-5 text-[#3f3f46]">
-              {item.summary}
-            </p>
-            <p className="mt-2 text-[11px] leading-5 text-[#71717a]">
-              ESへの使い道: {item.userRelevance}
-            </p>
-            {item.riskNote && (
-              <p className="mt-2 rounded-md bg-[#fff8e1] px-2 py-1 text-[11px] leading-5 text-[#7c4a03]">
-                {item.riskNote}
-              </p>
-            )}
-          </div>
-        ))}
-      </ResearchSection>
-
-      <div className="mt-4 space-y-2">
-        <p className="text-xs font-semibold text-[#71717a]">
-          ESレビューで見る観点
-        </p>
-        {research.esReviewFocus.map((focus) => (
-          <p
-            key={focus}
-            className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs leading-5"
-          >
-            {focus}
-          </p>
-        ))}
+            ))
+          )}
+        </ResearchSection>
       </div>
 
-      <details className="mt-3 text-xs">
+      <details className="border-t border-[#e4e4e7] px-4 py-3 text-xs">
         <summary className="cursor-pointer font-semibold">
           参照ソースと未確認事項
         </summary>
@@ -2009,6 +2348,50 @@ function ResearchInfo({ label, value }: { label: string; value: string }) {
   );
 }
 
+function EvidenceDigestCard({
+  item,
+  sourceLookup,
+}: {
+  item: CompanyResearchResponse["evidenceDigest"][number];
+  sourceLookup: Map<string, CompanyResearchSource>;
+}) {
+  const sourceNames = item.sourceIds
+    .map((sourceId) => getSourceDisplayName(sourceId, sourceLookup))
+    .filter(Boolean);
+
+  return (
+    <div className="rounded-md border border-[#ececef] bg-white px-3 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-md bg-[#f4f4f5] px-2 py-0.5 text-[10px] font-semibold text-[#52525b]">
+          {getEvidenceCategoryLabel(item.category)}
+        </span>
+        <UseRecommendationBadge value={item.useRecommendation} />
+      </div>
+      <p className="mt-2 text-sm font-semibold text-[#18181b]">{item.title}</p>
+      <p className="mt-2 text-xs leading-5 text-[#3f3f46]">{item.summary}</p>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        <div className="rounded-md bg-[#f8fafc] px-2 py-2">
+          <p className="text-[10px] font-semibold text-[#64748b]">ESでの使い方</p>
+          <p className="mt-1 text-[11px] leading-5 text-[#334155]">
+            {item.userRelevance || "企業理解の背景として確認します。"}
+          </p>
+        </div>
+        <div className="rounded-md bg-[#fff8e1] px-2 py-2">
+          <p className="text-[10px] font-semibold text-[#7c4a03]">注意点</p>
+          <p className="mt-1 text-[11px] leading-5 text-[#7c4a03]">
+            {item.riskNote || "ES本文では出典と文脈を確認してから使います。"}
+          </p>
+        </div>
+      </div>
+      {sourceNames.length > 0 && (
+        <p className="mt-2 text-[11px] leading-5 text-[#71717a]">
+          出典: {sourceNames.join(" / ")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function UseRecommendationBadge({
   value,
 }: {
@@ -2056,7 +2439,7 @@ function SourceTierBadge({
     public: { label: "公的", className: "bg-[#e7f5ea] text-[#14532d]" },
     secondary: { label: "二次情報", className: "bg-[#f4f4f5] text-[#52525b]" },
     user: { label: "ユーザー", className: "bg-[#f4f4f5] text-[#52525b]" },
-    model: { label: "AI知識", className: "bg-[#fff8e1] text-[#7c4a03]" },
+    model: { label: "未検証", className: "bg-[#fff8e1] text-[#7c4a03]" },
   }[tier];
 
   return (
@@ -2094,7 +2477,7 @@ function ReviewPage({
       <PageBody>
         <EmptyState
           title="レビューはまだ生成されていません"
-          description="左ナビの評価を生成ボタンからレビューを開始してください。"
+          description="左ナビのレビュー実行ボタンから開始してください。"
         />
       </PageBody>
     );
@@ -2105,7 +2488,7 @@ function ReviewPage({
   return (
     <PageBody>
       <PageHeader
-        label="Review"
+        label="レビュー"
         title={reviewResponse.summary.headline}
         description={reviewResponse.summary.overallComment}
       />
@@ -2128,7 +2511,7 @@ function ReviewPage({
         </section>
 
         <section className="rounded-md border border-[#e4e4e7] bg-[#fafafa] p-4">
-          <SectionHeader title="Company intelligence" icon={SearchCheck} />
+          <SectionHeader title="企業理解" icon={SearchCheck} />
           {reviewTarget && (
             <div className="mt-3">
               <CompanyIdentityCard
@@ -2207,7 +2590,7 @@ function ReviewPage({
                   )}
                 />
                 <Metric
-                  label="AI推定"
+                  label="未検証"
                   value={String(
                     acceptedCompanyResearch.sourceCoverage.modelKnowledge,
                   )}
@@ -2240,7 +2623,7 @@ function ReviewPage({
           <div className="mt-3 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
             <div>
               <p className="text-xs font-semibold text-[#71717a]">
-                AIが参照した情報
+                参照した情報
               </p>
               <div className="mt-2 overflow-hidden rounded-md border border-[#e4e4e7] bg-white">
                 {reviewResponse.sources.length === 0 ? (
@@ -2291,7 +2674,7 @@ function ReviewPage({
                           acceptedCompanyResearch.accessMode,
                         )}`
                       : reviewResponse.sources.some((source) => source.sourceType === "model_knowledge")
-                      ? "AI推定を含む"
+                      ? "未検証情報を含む"
                       : "入力情報のみ"}
                   </p>
                   <p className="mt-1 text-xs leading-5 text-[#71717a]">
@@ -2382,7 +2765,7 @@ function SuggestionsPage({
   return (
     <PageBody>
       <PageHeader
-        label="Suggestions"
+        label="改善提案"
         title="改善提案"
         description="提案を選ぶと右側に差分、根拠、議論、操作が表示されます。"
       />
@@ -2390,11 +2773,11 @@ function SuggestionsPage({
         <table className="w-full border-collapse text-sm">
           <thead className="bg-[#fafafa] text-left text-xs text-[#71717a]">
             <tr>
-              <th className="px-3 py-2">Title</th>
-              <th className="px-3 py-2">Type</th>
-              <th className="px-3 py-2">Severity</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Evidence</th>
+              <th className="px-3 py-2">提案</th>
+              <th className="px-3 py-2">観点</th>
+              <th className="px-3 py-2">優先度</th>
+              <th className="px-3 py-2">状態</th>
+              <th className="px-3 py-2">根拠</th>
             </tr>
           </thead>
           <tbody>
@@ -2417,10 +2800,12 @@ function SuggestionsPage({
                     </span>
                   </button>
                 </td>
-                <td className="px-3 py-3">{suggestion.type}</td>
-                <td className="px-3 py-3">{suggestion.severity}</td>
-                <td className="px-3 py-3">{suggestionStatuses[suggestion.id]}</td>
-                <td className="px-3 py-3">{suggestion.evidence.length} source</td>
+                <td className="px-3 py-3">{getSuggestionTypeLabel(suggestion.type)}</td>
+                <td className="px-3 py-3">{getSuggestionSeverityLabel(suggestion.severity)}</td>
+                <td className="px-3 py-3">
+                  {getSuggestionStatusLabel(suggestionStatuses[suggestion.id])}
+                </td>
+                <td className="px-3 py-3">{suggestion.evidence.length}件</td>
               </tr>
             ))}
           </tbody>
@@ -2446,7 +2831,7 @@ function FinalPage({
   return (
     <PageBody>
       <PageHeader
-        label="Final"
+        label="最終稿"
         title="最終稿"
         description="採用済み提案を反映した文面を、最後は自分の判断で編集します。"
       />
@@ -2457,11 +2842,11 @@ function FinalPage({
           className="min-h-[620px] w-full resize-none rounded-md border border-[#e4e4e7] bg-white px-4 py-4 text-[15px] leading-8 outline-none focus:border-[#18181b]"
         />
         <aside className="space-y-3">
-          <Metric label="Length" value={`${finalDraft.length}/${targetCount}`} />
-          <Metric label="Accepted" value={`${acceptedCount}`} />
-          <Metric label="Open" value={`${openCount}`} />
+          <Metric label="文字数" value={`${finalDraft.length}/${targetCount}字`} />
+          <Metric label="反映済み" value={`${acceptedCount}`} />
+          <Metric label="未処理" value={`${openCount}`} />
           <button className="w-full rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white">
-            Copy final draft
+            最終稿をコピー
           </button>
         </aside>
       </div>
@@ -2499,7 +2884,7 @@ function DetailDrawer({
   return (
     <aside className="min-h-0 overflow-y-auto border-l border-[#e4e4e7] bg-[#fafafa]">
       <div className="flex items-center justify-between border-b border-[#e4e4e7] px-4 py-3">
-        <p className="text-sm font-semibold">Details</p>
+        <p className="text-sm font-semibold">詳細</p>
         <button onClick={onClose} className="rounded p-1 hover:bg-white">
           <X size={15} />
         </button>
@@ -2534,15 +2919,15 @@ function AuditDrawer({ item }: { item: EvidenceAuditItem }) {
         <h2 className="mt-3 text-base font-semibold leading-6">{item.claimText}</h2>
         <p className="mt-2 text-sm leading-6 text-[#71717a]">{item.assessment}</p>
       </div>
-      <Metric label="Confidence" value={item.confidence} />
-      <Metric label="Source quality" value={item.sourceQuality} />
+      <Metric label="信頼度" value={getConfidenceLabel(item.confidence)} />
+      <Metric label="出典品質" value={getSourceQualityLabel(item.sourceQuality)} />
       <Metric
-        label="Checked by"
-        value={`${Object.values(item.checkedBy).filter(Boolean).length}/3 agents`}
+        label="確認状況"
+        value={`${Object.values(item.checkedBy).filter(Boolean).length}/3項目`}
       />
       <div>
         <p className="mb-2 text-xs font-semibold text-[#71717a]">
-          Evidence
+          根拠
         </p>
         {item.evidence.map((evidence) => (
           <div key={evidence.sourceId ?? evidence.sourceTitle} className="rounded-md border border-[#e4e4e7] bg-white p-3 text-sm">
@@ -2553,7 +2938,7 @@ function AuditDrawer({ item }: { item: EvidenceAuditItem }) {
             {evidence.url && (
               <a href={evidence.url} className="mt-2 inline-flex items-center gap-1 text-xs font-semibold underline" target="_blank" rel="noreferrer">
                 <Link2 size={12} />
-                source
+                出典を開く
               </a>
             )}
           </div>
@@ -2592,16 +2977,16 @@ function SuggestionDrawer({
     <div className="space-y-5 p-4">
       <div>
         <p className="text-xs font-semibold text-[#71717a]">
-          {suggestion.type} / {suggestion.severity}
+          {getSuggestionTypeLabel(suggestion.type)} / {getSuggestionSeverityLabel(suggestion.severity)}
         </p>
         <h2 className="mt-2 text-base font-semibold">{suggestion.title}</h2>
         <p className="mt-2 text-sm leading-6 text-[#71717a]">{suggestion.rationale}</p>
       </div>
-      <DiffBlock label="Before" tone="remove" text={suggestion.diffHint.before} />
-      <DiffBlock label="After" tone="add" text={suggestion.diffHint.after} />
+      <DiffBlock label="修正前" tone="remove" text={suggestion.diffHint.before} />
+      <DiffBlock label="修正案" tone="add" text={suggestion.diffHint.after} />
       <div>
         <p className="mb-2 text-xs font-semibold text-[#71717a]">
-          Edit before applying
+          反映前に調整
         </p>
         <textarea
           value={draftEditText}
@@ -2610,9 +2995,9 @@ function SuggestionDrawer({
         />
       </div>
       <div className="grid grid-cols-3 gap-2">
-        <ActionButton icon={Check} label="Accept" onClick={() => onAccept(suggestion)} />
-        <ActionButton icon={X} label="Reject" onClick={() => onReject(suggestion)} />
-        <ActionButton icon={PenLine} label="Edit" onClick={() => onEdit(suggestion, draftEditText)} />
+        <ActionButton icon={Check} label="採用" onClick={() => onAccept(suggestion)} />
+        <ActionButton icon={X} label="却下" onClick={() => onReject(suggestion)} />
+        <ActionButton icon={PenLine} label="編集反映" onClick={() => onEdit(suggestion, draftEditText)} />
       </div>
       <div className="rounded-md border border-[#e4e4e7] bg-[#fafafa] p-3">
         <div className="flex items-center gap-2">
@@ -2655,8 +3040,18 @@ function SuggestionDrawer({
   );
 }
 
-function PageBody({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto max-w-7xl px-6 py-6">{children}</div>;
+function PageBody({
+  children,
+  wide = false,
+}: {
+  children: React.ReactNode;
+  wide?: boolean;
+}) {
+  return (
+    <div className={`mx-auto px-6 py-6 ${wide ? "max-w-[1500px]" : "max-w-7xl"}`}>
+      {children}
+    </div>
+  );
 }
 
 function PageHeader({
@@ -2728,20 +3123,11 @@ function TextArea({
   );
 }
 
-function Status({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-[#e4e4e7] bg-[#fafafa] px-2.5 py-1.5">
-      <p className="text-[10px] text-[#71717a]">{label}</p>
-      <p className="mt-0.5 text-xs font-semibold">{value}</p>
-    </div>
-  );
-}
-
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-[#e4e4e7] bg-white px-3 py-2">
-      <p className="text-[10px] text-[#71717a]">{label}</p>
-      <p className="mt-1 text-sm font-semibold">{value}</p>
+    <div className="min-w-0 border-l border-[#e4e4e7] pl-3">
+      <p className="text-[11px] font-medium text-[#71717a]">{label}</p>
+      <p className="mt-1 break-words text-sm font-semibold text-[#27272a]">{value}</p>
     </div>
   );
 }
@@ -2801,7 +3187,7 @@ function SourceAccessBadge({
   const labels = {
     fetched: "取得済み",
     provided: "入力情報",
-    model_based: "AI推定",
+    model_based: "未検証",
     failed: "取得失敗",
   };
   const className =
@@ -2875,6 +3261,3 @@ function createInitialSuggestionStatuses(suggestions: Suggestion[]) {
     suggestions.map((suggestion) => [suggestion.id, "unreviewed"]),
   ) as Record<string, SuggestionStatus>;
 }
-
-
-

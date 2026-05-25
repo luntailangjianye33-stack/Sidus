@@ -75,7 +75,12 @@ function buildLogoCandidates(
 
   for (const img of extractTags(html, "img")) {
     const attrs = parseAttributes(img);
-    const src = attrs.src ?? "";
+    const src =
+      attrs.src ??
+      attrs["data-src"] ??
+      attrs["data-original"] ??
+      attrs["data-lazy-src"] ??
+      firstSrcsetUrl(attrs.srcset ?? attrs["data-srcset"] ?? "");
     if (!src) continue;
 
     const alt = attrs.alt ?? "";
@@ -84,7 +89,9 @@ function buildLogoCandidates(
     const text = `${src} ${alt} ${title} ${className}`.toLowerCase();
     let score = 0;
 
-    if (/logo|siteLogo|site-logo|header_logo|brand/iu.test(text)) score += 70;
+    if (/logo|siteLogo|site-logo|header_logo|brand|ci|symbol/iu.test(text)) {
+      score += 70;
+    }
     if (companyTokens.some((token) => text.includes(token))) score += 90;
     if (/header|globalheader|site/i.test(text)) score += 20;
     if (score <= 0) continue;
@@ -126,13 +133,41 @@ function buildLogoCandidates(
     if (property === "og:image" || property === "twitter:image") {
       candidates.push({
         url: absolutizeUrl(content, baseUrl),
-        score: 30,
+        score: /logo|brand|symbol/iu.test(content) ? 45 : 25,
         reason: property,
       });
     }
   }
 
+  for (const jsonLogoUrl of extractJsonLdLogoUrls(html)) {
+    candidates.push({
+      url: absolutizeUrl(jsonLogoUrl, baseUrl),
+      score: 95,
+      reason: "json-ld logo",
+    });
+  }
+
   candidates.push(
+    {
+      url: new URL("/logo.svg", baseUrl).toString(),
+      score: 42,
+      reason: "default logo svg",
+    },
+    {
+      url: new URL("/assets/logo.svg", baseUrl).toString(),
+      score: 38,
+      reason: "default assets logo svg",
+    },
+    {
+      url: new URL("/images/logo.svg", baseUrl).toString(),
+      score: 38,
+      reason: "default images logo svg",
+    },
+    {
+      url: new URL("/favicon.svg", baseUrl).toString(),
+      score: 28,
+      reason: "default favicon svg",
+    },
     {
       url: new URL("/apple-touch-icon.png", baseUrl).toString(),
       score: 20,
@@ -165,6 +200,55 @@ function parseAttributes(tag: string) {
   }
 
   return attrs;
+}
+
+function firstSrcsetUrl(srcset: string) {
+  return srcset
+    .split(",")
+    .map((part) => part.trim().split(/\s+/u)[0] ?? "")
+    .find(Boolean) ?? "";
+}
+
+function extractJsonLdLogoUrls(html: string) {
+  return extractScriptJsonLd(html).flatMap((value) => findLogoUrlsInJson(value));
+}
+
+function extractScriptJsonLd(html: string) {
+  const matches = html.matchAll(
+    /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/giu,
+  );
+  return Array.from(matches)
+    .map((match) => decodeHtml(match[1] ?? "").trim())
+    .filter(Boolean);
+}
+
+function findLogoUrlsInJson(jsonText: string): string[] {
+  try {
+    return findLogoValues(JSON.parse(jsonText));
+  } catch {
+    return [];
+  }
+}
+
+function findLogoValues(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap(findLogoValues);
+
+  const record = value as Record<string, unknown>;
+  const urls: string[] = [];
+  const logo = record.logo;
+  if (typeof logo === "string") urls.push(logo);
+  if (logo && typeof logo === "object" && !Array.isArray(logo)) {
+    const logoRecord = logo as Record<string, unknown>;
+    if (typeof logoRecord.url === "string") urls.push(logoRecord.url);
+    if (typeof logoRecord.contentUrl === "string") urls.push(logoRecord.contentUrl);
+  }
+
+  for (const child of Object.values(record)) {
+    if (child && typeof child === "object") urls.push(...findLogoValues(child));
+  }
+
+  return urls;
 }
 
 function createCompanyTokens(companyName: string) {
