@@ -87,6 +87,7 @@ function buildLogoCandidates(
     const title = attrs.title ?? "";
     const className = attrs.class ?? "";
     const text = `${src} ${alt} ${title} ${className}`.toLowerCase();
+    if (isCommemorativeLogoCandidate(text)) continue;
     let score = 0;
 
     if (/logo|siteLogo|site-logo|header_logo|brand|ci|symbol/iu.test(text)) {
@@ -131,6 +132,7 @@ function buildLogoCandidates(
     if (!content) continue;
 
     if (property === "og:image" || property === "twitter:image") {
+      if (isCommemorativeLogoCandidate(content.toLowerCase())) continue;
       candidates.push({
         url: absolutizeUrl(content, baseUrl),
         score: /logo|brand|symbol/iu.test(content) ? 45 : 25,
@@ -140,6 +142,7 @@ function buildLogoCandidates(
   }
 
   for (const jsonLogoUrl of extractJsonLdLogoUrls(html)) {
+    if (isCommemorativeLogoCandidate(jsonLogoUrl.toLowerCase())) continue;
     candidates.push({
       url: absolutizeUrl(jsonLogoUrl, baseUrl),
       score: 95,
@@ -183,6 +186,12 @@ function buildLogoCandidates(
   return dedupeCandidates(candidates)
     .filter((candidate) => candidate.url)
     .sort((a, b) => b.score - a.score);
+}
+
+function isCommemorativeLogoCandidate(text: string) {
+  return /周年|記念|anniversary|campaign|cp_|banner|kv|mainvisual|20th|30th|40th|50th|100th|150th|200th/iu.test(
+    text,
+  );
 }
 
 function extractTags(html: string, tagName: "img" | "link" | "meta") {
@@ -322,7 +331,7 @@ function fetchWithTimeout(url: string) {
   return fetch(url, {
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (compatible; SidusCompanyLogo/1.0; +https://localhost)",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5",
     },

@@ -16,6 +16,8 @@ export type SourceInput = {
 export type ApplicationTarget = {
   industry: string;
   companyName: string;
+  companyScope?: "auto" | "domestic" | "foreign";
+  corporateNumber?: string;
   position: string;
   companyMemo: string;
   referenceUrls: SourceInput[];
@@ -23,6 +25,26 @@ export type ApplicationTarget = {
 
 export type CompanyResearchRequest = {
   applicationTarget: ApplicationTarget;
+};
+
+export type BenchmarkResearchRequest = {
+  applicationTarget: ApplicationTarget;
+  acceptedCompanyResearch?: CompanyResearchResponse | null;
+};
+
+export type BenchmarkResearchSource = {
+  title: string;
+  url: string;
+  note: string;
+};
+
+export type BenchmarkResearchResponse = {
+  generatedAt: string;
+  companyName: string;
+  position: string;
+  benchmarkNotes: BenchmarkNotes;
+  sources: BenchmarkResearchSource[];
+  warnings: string[];
 };
 
 export type CompanyResearchSource = {
@@ -33,6 +55,7 @@ export type CompanyResearchSource = {
     | "url"
     | "official_site"
     | "recruiting"
+    | "company_database"
     | "public_registry"
     | "financial_disclosure"
     | "major_media"
@@ -100,6 +123,59 @@ export type CompanyEvidenceDigest = {
   riskNote: string;
 };
 
+export type CompanySourceChunk = {
+  chunkId: string;
+  sourceId: string;
+  lineStart: number;
+  lineEnd: number;
+  text: string;
+};
+
+export type CompanySourceManifestEntry = {
+  sourceId: string;
+  title: string;
+  url?: string;
+  sourceType: CompanyResearchSource["sourceType"];
+  sourceTier: CompanyResearchSource["sourceTier"];
+  retrievedAt: string;
+  chunks: CompanySourceChunk[];
+};
+
+export type CompanyClaimType =
+  | "legal_name"
+  | "corporate_number"
+  | "headquarters"
+  | "industry"
+  | "official_website"
+  | "securities_code"
+  | "listing_market"
+  | "capital"
+  | "revenue"
+  | "employees"
+  | "business_summary"
+  | "role_fit"
+  | "recent_development";
+
+export type CompanyClaimVerification =
+  | "supported"
+  | "weak"
+  | "unverified"
+  | "conflicted";
+
+export type CompanyClaim = {
+  id: string;
+  claimType: CompanyClaimType;
+  label: string;
+  text: string;
+  value?: string;
+  sourceIds: string[];
+  chunkIds: string[];
+  verification: CompanyClaimVerification;
+  confidence: "high" | "medium" | "low";
+  adopted: boolean;
+  note: string;
+};
+
 export type CompanySourceCoverage = {
   publicRegistry: number;
   official: number;
@@ -127,6 +203,8 @@ export type CompanyResearchResponse = {
   roleFitHypotheses: string[];
   esReviewFocus: string[];
   sources: CompanyResearchSource[];
+  sourceManifest: CompanySourceManifestEntry[];
+  companyClaims: CompanyClaim[];
   unknowns: string[];
   warnings: ReviewWarning[];
 };
@@ -140,6 +218,14 @@ export type UserContext = {
   seminarMemo: string;
   obOgMemo: string;
   additionalNotes: string;
+  benchmarkNotes?: BenchmarkNotes;
+};
+
+export type BenchmarkNotes = {
+  passedEssayPatterns: string;
+  strongPhrases: string;
+  weakGenericPhrases: string;
+  structureHints: string;
 };
 
 export type SampleEssay = {
@@ -259,8 +345,14 @@ export type CriterionReview = {
   criterion: ReviewCriterion;
   starRating: StarRating;
   comment: string;
+  ratingRationale: string;
+  targetText?: string;
+  evidenceReasoning?: string;
+  deductionReason?: string;
+  revisionDirection?: string;
   strengths: string[];
   weaknesses: string[];
+  evidence: EvidenceReference[];
 };
 
 export type Suggestion = {

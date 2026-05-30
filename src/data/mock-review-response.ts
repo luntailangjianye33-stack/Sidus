@@ -29,6 +29,19 @@ export const mockReviewResponse: ReviewResponse = {
         "課題、行動、結果、学びの順序は自然です。最後に応募先との接続を足すと、志望動機としての流れが強くなります。",
       strengths: ["経験の流れが追いやすい", "行動主体が明確"],
       weaknesses: ["志望先との接続が最後に急に出てくる"],
+      ratingRationale:
+        "ES本文の経験描写とユーザー提供の企業メモを照合し、この星数にしています。強みは行動の具体性がある点です。一方で、応募先固有の提供価値との接続がまだ薄いため満点にはしていません。",
+      evidence: [
+        {
+          sourceId: "essay-text",
+          sourceTitle: "ES本文",
+          url: "",
+          quotedOrParaphrasedEvidence: "課題、行動、結果、学びが本文に含まれている。",
+          reliability: "user_provided",
+          supportsClaim: true,
+          sourceQuality: "user_provided",
+        },
+      ],
     },
     {
       criterion: "specificity_and_original_experience",
@@ -37,6 +50,19 @@ export const mockReviewResponse: ReviewResponse = {
         "フォーム改善やリマインド運用という具体性はありますが、成果の数値が不足しています。",
       strengths: ["実際に行った改善内容が書かれている"],
       weaknesses: ["説明会参加率の改善幅が不明"],
+      ratingRationale:
+        "ES本文の経験描写とユーザー提供の企業メモを照合し、この星数にしています。強みは行動の具体性がある点です。一方で、応募先固有の提供価値との接続がまだ薄いため満点にはしていません。",
+      evidence: [
+        {
+          sourceId: "essay-text",
+          sourceTitle: "ES本文",
+          url: "",
+          quotedOrParaphrasedEvidence: "課題、行動、結果、学びが本文に含まれている。",
+          reliability: "user_provided",
+          supportsClaim: true,
+          sourceQuality: "user_provided",
+        },
+      ],
     },
     {
       criterion: "company_understanding_and_fit",
@@ -45,6 +71,19 @@ export const mockReviewResponse: ReviewResponse = {
         "業務改善への関心は伝わりますが、応募先が扱う業務領域への理解をもう一段具体化できます。",
       strengths: ["SaaS企業との接点を作りやすい経験がある"],
       weaknesses: ["企業の提供価値への言及がまだ抽象的"],
+      ratingRationale:
+        "ES本文の経験描写とユーザー提供の企業メモを照合し、この星数にしています。強みは行動の具体性がある点です。一方で、応募先固有の提供価値との接続がまだ薄いため満点にはしていません。",
+      evidence: [
+        {
+          sourceId: "essay-text",
+          sourceTitle: "ES本文",
+          url: "",
+          quotedOrParaphrasedEvidence: "課題、行動、結果、学びが本文に含まれている。",
+          reliability: "user_provided",
+          supportsClaim: true,
+          sourceQuality: "user_provided",
+        },
+      ],
     },
     {
       criterion: "expression_quality",
@@ -53,6 +92,19 @@ export const mockReviewResponse: ReviewResponse = {
         "表現はおおむね自然です。最後の一文だけ少し一般的なので、企業文脈を入れると締まります。",
       strengths: ["読みやすく過度な装飾がない"],
       weaknesses: ["志望理由の表現が汎用的"],
+      ratingRationale:
+        "ES本文の経験描写とユーザー提供の企業メモを照合し、この星数にしています。強みは行動の具体性がある点です。一方で、応募先固有の提供価値との接続がまだ薄いため満点にはしていません。",
+      evidence: [
+        {
+          sourceId: "essay-text",
+          sourceTitle: "ES本文",
+          url: "",
+          quotedOrParaphrasedEvidence: "課題、行動、結果、学びが本文に含まれている。",
+          reliability: "user_provided",
+          supportsClaim: true,
+          sourceQuality: "user_provided",
+        },
+      ],
     },
     {
       criterion: "authenticity_and_ai_likeness",
@@ -61,6 +113,19 @@ export const mockReviewResponse: ReviewResponse = {
         "具体的な運用改善経験があるため、AI生成文のような空疎さは比較的少ないです。",
       strengths: ["本人が経験した行動が見える"],
       weaknesses: ["最後の価値提供表現はややテンプレート的"],
+      ratingRationale:
+        "ES本文の経験描写とユーザー提供の企業メモを照合し、この星数にしています。強みは行動の具体性がある点です。一方で、応募先固有の提供価値との接続がまだ薄いため満点にはしていません。",
+      evidence: [
+        {
+          sourceId: "essay-text",
+          sourceTitle: "ES本文",
+          url: "",
+          quotedOrParaphrasedEvidence: "課題、行動、結果、学びが本文に含まれている。",
+          reliability: "user_provided",
+          supportsClaim: true,
+          sourceQuality: "user_provided",
+        },
+      ],
     },
   ],
   evidenceAudit: [

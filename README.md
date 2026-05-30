@@ -1,66 +1,149 @@
 # Sidus
 
-Sidus is an evidence-linked ES review workspace for ambitious job applicants.
+Sidus は、LLMを活用した ES添削・ブラッシュアップ Webプロトタイプです。
+AIが最終稿を勝手に作るのではなく、ユーザーが企業情報、参考ESベンチマーク、レビュー根拠、改善提案を確認しながら、採用・却下・編集を判断する Human-in-the-Loop 型の設計にしています。
 
-It is not an AI ghostwriter. The product helps a user inspect whether an entry sheet connects their own experience, company understanding, logical structure, and expression quality with enough evidence. The user stays in control by accepting, rejecting, editing, and discussing each suggestion before producing the final draft.
+## 課題要件への対応
 
-## Core Experience
+- ES原稿入力
+  - テキスト入力
+  - PDF / Markdown / テキストファイルからの抽出
+  - サンプルESの読み込み
+- 添削条件入力
+  - 業界、企業名、職種、企業メモ
+  - 目標文字数
+  - 志望軸、自己PR、ガクチカ、スキル、価値観
+  - 参照URL、法人番号、国内企業/外資ブランド切替
+- LLMレビュー
+  - JSON構造化レビュー
+  - 星評価、評価理由、根拠、減点理由、修正方向
+  - 改善提案、差分、採用/却下/編集
+- ユーザー確認UI
+  - 企業調査の採用/破棄
+  - 参考ESベンチマーク確認
+  - 評価項目の詳細表示
+  - 提案の根拠確認
+  - 最終稿エディタ
+- テストデータ
+  - 個人情報を含まない架空ESデータを5パターン用意
 
-1. Enter an ES draft, target company, target role, company memo, source URL, and user context.
-2. Run Company Research to generate an AI company understanding memo.
-3. Review the sources, access status, unknowns, and ES review focus.
-4. Accept or discard the company understanding.
-5. Run ES Review.
-6. Inspect the score, criterion reviews, company intelligence, evidence audit, and suggestions.
-7. Open a suggestion, compare before/after text, ask follow-up questions, and receive a revised proposal.
-8. Accept, reject, or edit suggestions.
-9. Finish in the final draft editor.
+## 主な画面フロー
 
-## Implemented Features
+1. `前提情報`
+   - ES本文、応募先、本人文脈、目標文字数を入力します。
+2. `企業調査`
+   - 公式サイト、日経会社情報、公的/会社DB、IR、採用情報を確認し、ESレビュー用の企業理解を作ります。
+3. `参考ES`
+   - 通過ES本文をコピーせず、構成、語彙、弱い汎用表現、構成ヒントだけをレビュー基準に変換します。
+4. `レビュー`
+   - 論理構成、具体性、企業理解、表現品質、本人性を評価します。
+5. `提案`
+   - 修正前/修正案、根拠、採用前確認事項を見ながら、提案を採用・却下・編集します。
+6. `最終稿`
+   - 採用済み提案を反映した文面を、ユーザーが最後に編集・コピーします。
 
-- Next.js App Router with TypeScript and Tailwind CSS
-- Sample ES loading
-- New ES review workspace
-- Company Research API: `/api/company-research`
-- Company Research UI with accept/discard flow
-- Source access status display:
-  - `Fetched`
-  - `Provided`
-  - `Model`
-  - `Fetch failed`
-- ES Review API: `/api/review`
-- Structured Outputs schemas for AI responses
-- Evidence audit by claim
-- Suggestion list with severity and status
-- Suggestion detail drawer with diff-like before/after display
-- Accept, reject, and edit flows
-- Discussion API: `/api/discuss`
-- Follow-up question and revised suggestion flow
-- Final draft editor
-- Mock fallback when `OPENAI_API_KEY` is not configured
+## 実装した工夫
 
-## AI Behavior
+### Human-in-the-Loop
 
-Sidus uses OpenAI when `OPENAI_API_KEY` is set in `.env.local`.
+AIの出力をそのまま最終稿にしません。
+企業理解、レビュー、提案、最終稿の各段階で、ユーザーが確認し、採用・却下・編集できます。
 
-If the API key is not configured, the app uses contextual mock fallback responses. This keeps the UI usable during development, but real company research and ES review quality must be evaluated with an actual API key.
+### 企業情報の証拠台帳
 
-The current AI-related routes are:
+企業調査では、取得した情報を source / claim 単位で管理します。
+
+- `確認済み`
+- `要確認`
+- `未確認`
+- `矛盾あり`
+
+未確認の情報は無理に断定せず、UIに表示します。
+
+### 企業識別の安定化
+
+国内企業と外資ブランドで探索方針を分けています。
+
+- 国内企業
+  - 公式会社概要
+  - 日経会社情報
+  - IR
+  - 法人番号 / gBizINFO / EDINET
+- 外資ブランド
+  - 公式グローバルサイト
+  - 公式日本サイト
+  - 公式採用サイト
+  - 日本法人DBは補助扱い
+
+東京エレクトロンのように同名・類似会社が混ざりやすいケースでは、公式ドメインや既知の日経会社情報URLを優先し、関連会社や別法人の混入を避けるフィルタを入れています。
+
+### 法人番号の扱い
+
+法人番号は、確認済みソースまたはユーザー入力を優先します。
+ユーザーが `法人番号` 欄、企業メモ、参照URL欄のいずれかに13桁の法人番号を入れた場合、その値を検索結果より優先して固定欄に反映します。
+
+また、国税庁 法人番号システムWeb-API用の専用ルートも実装しています。
+利用する場合は、国税庁から発行されたアプリケーションIDを `.env.local` に設定します。
+
+```env
+NTA_CORPORATE_NUMBER_APP_ID=your_app_id_here
+```
+
+### 参考ESベンチマーク
+
+通過ES本文を丸写しするのではなく、次の情報だけをレビューに使います。
+
+- 通過ESの型
+- 強い語彙・言い回し
+- 弱い汎用表現
+- 構成ヒント
+
+これにより、参考ESを「盗用元」ではなく「評価基準」として扱います。
+
+### 提案文の安全化
+
+LLMが返した提案文が、実際に貼れないメタ文になった場合は後処理で補正します。
+
+例:
+
+- `〜してください`
+- `具体的に示したい`
+- 企業文脈に合わない語彙
+- 他企業向けの表現
+
+これらを検出し、本人経験・企業情報・参考ESメモから、実際に置換できる日本語に寄せます。
+
+## サンプルES
+
+提出用に、個人情報を含まない5つのサンプルを用意しています。
+
+1. 東京エレクトロン株式会社 / AI・ソフトウェア系エンジニア
+2. 鹿島建設株式会社 / 数理情報系・IT戦略
+3. 日本経済新聞社 / 記者職インターン
+4. 三菱商事株式会社 / 総合職
+5. Goldman Sachs / ジュニアアナリスト
+
+## API
 
 - `POST /api/company-research`
-  - Builds a company understanding memo.
-  - Attempts to fetch reference URL text.
-  - Returns sources, access status, unknowns, and ES review focus.
-
+  - 企業情報調査
+  - source manifest、claim、証拠台帳、ES論点を返します。
+- `POST /api/benchmark-research`
+  - 参考ESベンチマーク生成
+  - 通過ESの型、語彙、弱い表現、構成ヒントを返します。
 - `POST /api/review`
-  - Reviews the ES using the current company memo and user context.
-  - Returns score, criterion reviews, evidence audit, suggestions, final draft, sources, and warnings.
-
+  - ESレビュー
+  - 評価、根拠、改善提案、最終稿候補を返します。
 - `POST /api/discuss`
-  - Reconsiders one suggestion based on a user question.
-  - Returns an answer, revised suggestion, evidence notes, and user confirmation items.
+  - 改善提案について追加質問し、提案を再検討します。
+- `POST /api/document-intake`
+  - PDF / Markdown / テキストファイルからES候補を抽出します。
+- `POST /api/corporate-number-resolve`
+  - 国税庁 法人番号システムWeb-APIによる法人番号照合です。
+- `GET /api/company-logo`
+  - 公式サイトからロゴ候補を取得します。
 
-## Local Setup
+## セットアップ
 
 ```bash
 npm install
@@ -68,98 +151,67 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open:
+ブラウザで開きます。
 
 ```text
 http://localhost:3000
 ```
 
-`.env.local`:
+`.env.local` の例:
 
-```bash
+```env
 OPENAI_API_KEY=your_rotated_key_here
 OPENAI_MODEL=gpt-4o-mini
+
+# 任意: 国税庁法人番号Web-APIを使う場合
+NTA_CORPORATE_NUMBER_APP_ID=your_app_id_here
 ```
 
-Use a rotated key. Do not commit `.env.local`.
+`.env.local` はコミットしません。
 
-## Verification
+## 検証
 
 ```bash
 npm run lint
 npm run build
 ```
 
-Real API smoke test:
+実API確認用:
 
 ```bash
 npm run smoke:api
 ```
 
-The smoke test calls:
+## デモ動画の流れ
 
-- `POST /api/company-research`
-- `POST /api/review`
-- `POST /api/discuss`
+推奨デモ企業は `東京エレクトロン株式会社 / AI・ソフトウェア系エンジニア` です。
 
-If any route falls back to mock mode, the script prints a warning and exits with a non-zero status. Add a rotated `OPENAI_API_KEY` to `.env.local`, restart the dev server, and run it again.
+1. 保存ファイルからTELサンプルを開く
+2. 前提情報を確認する
+3. 企業調査を実行する
+4. 日経会社情報、公式会社概要、証拠台帳を確認する
+5. 企業理解を採用する
+6. 参考ESベンチマークを確認する
+7. レビューを実行する
+8. 評価項目をクリックし、対象文/評価理由/根拠/減点理由/修正方向を見る
+9. 提案画面で修正前/修正案を確認する
+10. 提案を採用または編集反映する
+11. 最終稿で文面を確認し、コピーまたは保存する
 
-Restart dev server and run the real API smoke test:
+## 既知の制約
 
-```bash
-npm run verify:real-api
-```
+- 外部情報取得は、対象サイトのHTML構造やアクセス可否に依存します。
+- 法人番号の完全自動取得には、国税庁Web-APIのアプリケーションIDが必要です。
+- 企業名だけでは同名別法人が混ざる可能性があるため、公式URL、証券コード、日経会社情報URL、法人番号のいずれかを指定すると安定します。
+- 参考ESは本文を再利用せず、構成・語彙・観点だけを利用する設計です。
+- 保存データはブラウザのローカルストレージに保存されます。
 
-This command:
+## 技術スタック
 
-1. Checks that `.env.local` contains a non-empty `OPENAI_API_KEY`.
-2. Restarts the local Next.js dev server on port `3000`.
-3. Waits for `http://localhost:3000`.
-4. Runs `npm run smoke:api`.
-5. Fails if any API route still uses mock fallback.
-
-Current verification status:
-
-- `npm run lint`: passing
-- `npm run build`: passing
-- `/api/review`: mock fallback smoke tested
-- `/api/company-research`: mock fallback smoke tested
-- `/api/discuss`: mock fallback smoke tested
-
-## Demo Scenario
-
-Recommended short demo flow:
-
-1. Click `新しいES校正`.
-2. Paste an ES draft.
-3. Enter a company name, industry, role, company memo, and source URL.
-4. Click `企業情報をAI調査`.
-5. Show the AI company memo, source access status, and unknowns.
-6. Click `この企業理解を採用`.
-7. Click `Reviewを生成`.
-8. Show `Company intelligence` and `Evidence audit`.
-9. Open `Suggestions`.
-10. Select one suggestion.
-11. Ask a follow-up question in `この提案について議論`.
-12. Show the revised proposal and confirmation items.
-13. Accept or edit the suggestion.
-14. Show the final draft.
-
-## Design Notes
-
-Sidus is designed around human-in-the-loop editing:
-
-- AI proposes; the user decides.
-- Company claims are separated from writing suggestions.
-- The system shows what it used and what remains unknown.
-- Source access status is visible instead of hidden.
-- Mock fallback never pretends to be verified official research.
-
-## Known Limitations
-
-- Real OpenAI behavior still needs final tuning with an actual API key.
-- Reference URL fetching is basic HTML text extraction and can fail depending on the site.
-- There is no full search-engine workflow yet.
-- PDF upload is not implemented.
-- Discussion history is local to the current browser session.
-- The UI is MVP-level and still needs final polish for submission.
+- Next.js App Router
+- React
+- TypeScript
+- Tailwind CSS
+- OpenAI API
+- pdf-parse
+- lucide-react

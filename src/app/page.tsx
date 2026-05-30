@@ -2,6 +2,8 @@
 
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   CircleAlert,
   FileText,
   Link2,
@@ -11,6 +13,7 @@ import {
   PanelLeftOpen,
   PenLine,
   Plus,
+  Save,
   SearchCheck,
   ShieldCheck,
   X,
@@ -24,13 +27,16 @@ import {
 } from "react";
 import { mockReviewResponse } from "@/data/mock-review-response";
 import { defaultSampleEssay, sampleEssays } from "@/data/sample-essays";
+import { normalizeApplicationTarget } from "@/lib/application-target";
 import { createReviewRequest } from "@/lib/create-review-request";
+import { requestBenchmarkResearch } from "@/lib/benchmark-research-client";
 import { requestCompanyResearch } from "@/lib/company-research-client";
 import { requestDocumentExtraction } from "@/lib/document-intake-client";
 import { requestSuggestionDiscussion } from "@/lib/discuss-client";
 import { requestReview } from "@/lib/review-client";
 import type {
   ApplicationTarget,
+  BenchmarkResearchResponse,
   CompanyResearchResponse,
   CompanyResearchSource,
   DocumentExtractionCandidate,
@@ -47,17 +53,56 @@ import type {
   VerificationStatus,
 } from "@/types/sidus";
 
-type PageId = "context" | "research" | "review" | "suggestions" | "final";
+type PageId =
+  | "library"
+  | "context"
+  | "research"
+  | "benchmark"
+  | "review"
+  | "suggestions"
+  | "final";
 type DrawerItem =
   | { kind: "suggestion"; item: Suggestion }
   | { kind: "audit"; item: EvidenceAuditItem }
   | null;
 type CompanyResearchStatus = "idle" | "pending" | "accepted";
+type WorkflowStatus = "done" | "next" | "locked" | "available";
 type CompanyResearchProgressStep = {
   label: string;
   detail: string;
   searchFocus: string;
 };
+type SavedEssayDraft = {
+  id: string;
+  title: string;
+  savedAt: string;
+  selectedSampleId: string;
+  essayTitle: string;
+  essaySourceType: EssaySourceType;
+  essayText: string;
+  finalDraft: string;
+  targetCount: number;
+  applicationTarget: ApplicationTarget;
+  userContext: UserContext;
+  reviewRequest: ReviewRequest | null;
+  reviewResponse: ReviewResponse | null;
+  suggestionStatuses: Record<string, SuggestionStatus>;
+  companyResearch: CompanyResearchResponse | null;
+  acceptedCompanyResearch: CompanyResearchResponse | null;
+  companyResearchStatus: CompanyResearchStatus;
+  benchmarkResearch: BenchmarkResearchResponse | null;
+};
+type EssayDirectionSuggestion = {
+  id: string;
+  title: string;
+  reason: string;
+  motivationAxis: string;
+  selfPr: string;
+  studentExperience: string;
+  evidenceLabel: string;
+};
+
+const savedEssaysStorageKey = "sidus-saved-essays-v1";
 
 const criteria: ReviewCriterion[] = [
   "logical_structure",
@@ -69,29 +114,29 @@ const criteria: ReviewCriterion[] = [
 
 const companyResearchProgressSteps: CompanyResearchProgressStep[] = [
   {
-    label: "指定URLを確認中",
-    detail: "入力された公式・日経会社情報・公的情報URLを最優先で読んでいます。",
-    searchFocus: "ユーザー指定URL / 公式会社概要",
+    label: "公式会社概要を確認中",
+    detail: "入力URLと公式サイトから、対象企業そのものの会社概要を優先して確認しています。",
+    searchFocus: "公式会社概要 / 公式企業情報",
   },
   {
-    label: "信頼DBを探索中",
-    detail: "日経会社情報、法人番号、gBizINFO、EDINETを優先して探しています。",
-    searchFocus: "日経会社情報 / 法人番号 / gBizINFO / EDINET",
+    label: "法人番号ページを確認中",
+    detail: "法人番号、gBizINFO、日経会社情報など、固定欄に使える信頼DBを照合しています。",
+    searchFocus: "法人番号 / gBizINFO / 日経会社情報",
   },
   {
-    label: "候補URLを検証中",
-    detail: "子会社、就活媒体、自動生成ページなどが混ざらないか確認しています。",
-    searchFocus: "対象企業そのもののページ判定",
+    label: "IR/ニュースページを確認中",
+    detail: "公式IR、ニュースリリース、採用情報から、ESで使える事業理解を探しています。",
+    searchFocus: "公式IR / ニュース / 採用情報",
   },
   {
-    label: "本文を取得中",
-    detail: "取得できたページからESレビューに使える範囲だけを抽出しています。",
-    searchFocus: "出典本文 / 会社概要 / 採用情報",
+    label: "就活媒体を除外中",
+    detail: "子会社、口コミ、就活媒体、自動生成ページが主根拠に混ざらないように弾いています。",
+    searchFocus: "除外判定 / 対象企業の同一性",
   },
   {
-    label: "レポート生成中",
-    detail: "確認済みソースだけを使い、未確認情報は分けて整理しています。",
-    searchFocus: "事業説明 / ES論点 / unknowns",
+    label: "出典本文を抽出中",
+    detail: "確認済みソースから、ESレビューに強く影響させる企業固有の論点だけを抽出しています。",
+    searchFocus: "出典本文 / ES論点 / 未確認事項",
   },
 ];
 
@@ -105,8 +150,10 @@ const navItems: {
   description: string;
   icon: LucideIcon;
 }[] = [
+  { id: "library", label: "保存ファイル", description: "保存ESとサンプル", icon: Save },
   { id: "context", label: "前提情報", description: "ESと本人文脈", icon: FileText },
   { id: "research", label: "企業調査", description: "出典と企業理解", icon: ShieldCheck },
+  { id: "benchmark", label: "参考ES", description: "型と語彙", icon: SearchCheck },
   { id: "review", label: "レビュー", description: "採点と根拠確認", icon: SearchCheck },
   { id: "suggestions", label: "提案", description: "提案と差分", icon: MessageSquare },
   { id: "final", label: "最終稿", description: "編集と出力", icon: PenLine },
@@ -115,6 +162,8 @@ const navItems: {
 const blankApplicationTarget: ApplicationTarget = {
   industry: "",
   companyName: "",
+  companyScope: "auto",
+  corporateNumber: "",
   position: "",
   companyMemo: "",
   referenceUrls: [],
@@ -129,6 +178,12 @@ const blankUserContext: UserContext = {
   seminarMemo: "",
   obOgMemo: "",
   additionalNotes: "",
+  benchmarkNotes: {
+    passedEssayPatterns: "",
+    strongPhrases: "",
+    weakGenericPhrases: "",
+    structureHints: "",
+  },
 };
 
 const companyReferenceFields = [
@@ -175,7 +230,19 @@ function getSourceDomain(url?: string) {
 }
 
 function getCompanyReferenceUrl(target: ApplicationTarget) {
-  return target.referenceUrls.find((source) => source.url)?.url;
+  const officialUrl = target.referenceUrls.find((source) => {
+    const text = `${source.id} ${source.title} ${source.memo ?? ""}`.toLowerCase();
+    const domain = getSourceDomain(source.url);
+    return (
+      source.url &&
+      !isRecruitingOrAggregatorUrl(source.url) &&
+      !domain.includes("nikkei.") &&
+      !domain.includes("irbank.") &&
+      /公式|会社概要|企業情報|採用|ir|official|company|corporate|about/u.test(text)
+    );
+  })?.url;
+
+  return officialUrl || target.referenceUrls.find((source) => source.url)?.url;
 }
 
 function isKnownCompanyValue(value?: string) {
@@ -219,7 +286,8 @@ function getPrimaryCompanyUrl(research: CompanyResearchResponse) {
   const officialSource = research.sources.find(
     (source) =>
       source.url &&
-      source.sourceType === "official_site" &&
+      (source.sourceType === "official_site" ||
+        source.sourceType === "company_database") &&
       !isRecruitingOrAggregatorUrl(source.url),
   );
   if (officialSource?.url) return officialSource.url;
@@ -286,6 +354,7 @@ function getConfidenceLabel(confidence: CompanyResearchResponse["confidence"]) {
 
 function getSourceTypeLabel(sourceType: CompanyResearchSource["sourceType"]) {
   const labels: Record<CompanyResearchSource["sourceType"], string> = {
+    company_database: "日経会社情報",
     official_site: "公式サイト",
     recruiting: "公式採用",
     public_registry: "公的情報",
@@ -413,8 +482,196 @@ function getSuggestionStatusLabel(status: SuggestionStatus) {
   return labels[status];
 }
 
+function getReusableCompanyRisk(
+  essayText: string,
+  applicationTarget: ApplicationTarget,
+) {
+  const essay = essayText.trim();
+  const companyName = applicationTarget.companyName.trim();
+  if (!essay || !companyName) return null;
+
+  const specificTerms = getCompanySpecificTerms(applicationTarget);
+  const matchedTerms = specificTerms.filter((term) => essay.includes(term));
+  const mentionsCompany = essay.includes(companyName);
+  const genericSignals = [
+    "貴社でも",
+    "社会に貢献",
+    "お客様に寄り添",
+    "成長したい",
+    "挑戦したい",
+    "強みを活か",
+    "課題解決",
+  ].filter((term) => essay.includes(term));
+
+  if (matchedTerms.length >= 2 && mentionsCompany) return null;
+  if (matchedTerms.length >= 3) return null;
+  if (!mentionsCompany && genericSignals.length === 0) return null;
+
+  return {
+    matchedTerms,
+    genericSignals,
+    reason:
+      matchedTerms.length === 0
+        ? "企業固有の事業・顧客・提供価値が本文にほとんど入っていません。"
+        : "企業名は出ていても、本文の根拠が企業固有情報まで届いていない可能性があります。",
+  };
+}
+
+function getCompanySpecificTerms(applicationTarget: ApplicationTarget) {
+  const text = [
+    applicationTarget.companyName,
+    applicationTarget.industry,
+    applicationTarget.position,
+    applicationTarget.companyMemo,
+  ].join(" ");
+  const stopWords = new Set([
+    "企業",
+    "会社",
+    "事業",
+    "情報",
+    "サービス",
+    "インターン",
+    "日本",
+    "株式会社",
+    "できる",
+    "いる",
+    "する",
+    "ます",
+    "です",
+  ]);
+
+  return [
+    ...new Set(
+      text
+        .split(/[\s　、。・/／|｜,，.。()（）「」『』【】\[\]{}:：;；-]+/u)
+        .map((term) => term.trim())
+        .filter((term) => term.length >= 2 && !stopWords.has(term)),
+    ),
+  ].slice(0, 24);
+}
+
+function normalizeUserContext(context: UserContext): UserContext {
+  return {
+    ...context,
+    benchmarkNotes: {
+      passedEssayPatterns: context.benchmarkNotes?.passedEssayPatterns ?? "",
+      strongPhrases: context.benchmarkNotes?.strongPhrases ?? "",
+      weakGenericPhrases: context.benchmarkNotes?.weakGenericPhrases ?? "",
+      structureHints: context.benchmarkNotes?.structureHints ?? "",
+    },
+  };
+}
+
+function hasBenchmarkNotes(context: UserContext) {
+  const notes = context.benchmarkNotes;
+  if (!notes) return false;
+  return [
+    notes.passedEssayPatterns,
+    notes.strongPhrases,
+    notes.weakGenericPhrases,
+    notes.structureHints,
+  ].some((value) => value.trim().length > 0);
+}
+
+function createEssayDirectionSuggestions({
+  applicationTarget,
+  userContext,
+  acceptedCompanyResearch,
+}: {
+  applicationTarget: ApplicationTarget;
+  userContext: UserContext;
+  acceptedCompanyResearch: CompanyResearchResponse | null;
+}): EssayDirectionSuggestion[] {
+  const company = applicationTarget.companyName || "応募先企業";
+  const position = applicationTarget.position || "志望職種";
+  const focus =
+    acceptedCompanyResearch?.esReviewFocus[0] ||
+    acceptedCompanyResearch?.roleFitHypotheses[0] ||
+    applicationTarget.companyMemo ||
+    "企業固有の提供価値と本人経験の接続";
+  const business =
+    acceptedCompanyResearch?.businessSummary[0] ||
+    acceptedCompanyResearch?.companyUnderstandingMemo ||
+    applicationTarget.companyMemo ||
+    `${company}の事業理解`;
+  const benchmark = userContext.benchmarkNotes;
+  const strongPhrase =
+    benchmark?.strongPhrases
+      ?.split(/\n/u)
+      .map((item) => item.trim())
+      .find(Boolean) || "企業固有の課題に対して自分の経験をどう使うか";
+  const studentExperience =
+    userContext.studentExperience ||
+    "これまでの経験で、課題を分解し、周囲を巻き込みながら改善したこと";
+  const selfPr =
+    userContext.selfPr ||
+    "複雑な情報を整理し、相手が判断しやすい形に落とし込めること";
+
+  return [
+    {
+      id: "direction-company-fit",
+      title: "企業理解を主軸にする",
+      reason: `採用済み企業調査の論点「${focus.slice(0, 80)}」を起点に、${company}である必然性を強めます。`,
+      motivationAxis: `${company}の${business.slice(0, 90)}に関心がある。${position}として、企業固有の提供価値と自分の経験を接続し、現場で再現できる貢献をしたい。`,
+      selfPr,
+      studentExperience,
+      evidenceLabel: acceptedCompanyResearch
+        ? "採用済み企業調査"
+        : "企業メモ",
+    },
+    {
+      id: "direction-experience-fit",
+      title: "本人経験を主軸にする",
+      reason: "自己PRとガクチカを先に置き、企業情報は経験の延長線として接続します。",
+      motivationAxis: `自分の強みである「${selfPr.slice(0, 60)}」を、${company}の${position}で求められる課題解決に活かしたい。`,
+      selfPr,
+      studentExperience,
+      evidenceLabel: "本人文脈",
+    },
+    {
+      id: "direction-benchmark-fit",
+      title: "通過ESの型に寄せる",
+      reason: `参考ESベンチマークの語彙「${strongPhrase.slice(0, 70)}」を、本人経験の言葉に変換して使います。`,
+      motivationAxis: `${strongPhrase}という観点から、${company}で自分の経験を具体的な行動に変えたい。`,
+      selfPr,
+      studentExperience,
+      evidenceLabel: hasBenchmarkNotes(userContext)
+        ? "参考ESベンチマーク"
+        : "構成候補",
+    },
+  ];
+}
+
+function getReviewBlockReason({
+  isContextReady,
+  isCompanyReady,
+  isBenchmarkReady,
+}: {
+  isContextReady: boolean;
+  isCompanyReady: boolean;
+  isBenchmarkReady: boolean;
+}) {
+  if (!isContextReady) {
+    return "前提情報でES本文・企業名・職種を入力してください。";
+  }
+  if (!isCompanyReady) {
+    return "次は企業調査を実行し、内容を採用してください。";
+  }
+  if (!isBenchmarkReady) {
+    return "次は参考ESページで構成・語彙ベンチマークを作ってください。";
+  }
+  return "";
+}
+
 function formatCompanyResearchForReview(research: CompanyResearchResponse) {
   const identity = research.identitySummary;
+  const claims = (research.companyClaims ?? [])
+    .filter((claim) => claim.adopted)
+    .map(
+      (claim) =>
+        `- ${claim.label}: ${claim.text} [${claim.verification}, source: ${claim.sourceIds.join(", ") || "none"}]`,
+    )
+    .join("\n");
   const financial = research.financialHighlights
     .map((item) => `- ${item.label}: ${item.value} (${item.period}, source: ${item.sourceId})`)
     .join("\n");
@@ -444,6 +701,9 @@ function formatCompanyResearchForReview(research: CompanyResearchResponse) {
     `業種分類: ${getDisplayValue(identity.industryClassification)}`,
     `公式サイト: ${getDisplayValue(identity.officialWebsite)}`,
     `証券コード/市場: ${getDisplayValue(identity.securitiesCode)} / ${getDisplayValue(identity.listingMarket)}`,
+    "",
+    "証拠台帳Claims",
+    claims || "- 採用済みclaimなし",
     "",
     "事業理解",
     ...research.businessSummary.map((item) => `- ${item}`),
@@ -498,6 +758,22 @@ function applyPartialDiff(
   return `${current.slice(0, start)}${replacement}${current.slice(end)}`;
 }
 
+function removeDuplicateJapaneseSentences(text: string) {
+  const seen = new Set<string>();
+  return text
+    .split(/(?<=。)/u)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => {
+      if (!sentence) return false;
+      if (!sentence.endsWith("。") || sentence.length < 18) return true;
+      const normalized = sentence.replace(/\s+/gu, "");
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    })
+    .join("");
+}
+
 export default function Home() {
   const [page, setPage] = useState<PageId>("context");
   const [navWidth, setNavWidth] = useState(248);
@@ -520,7 +796,7 @@ export default function Home() {
   const [applicationTarget, setApplicationTarget] =
     useState<ApplicationTarget>(defaultSampleEssay.applicationTarget);
   const [userContext, setUserContext] = useState<UserContext>(
-    defaultSampleEssay.userContext,
+    normalizeUserContext(defaultSampleEssay.userContext),
   );
   const [reviewRequest, setReviewRequest] = useState<ReviewRequest | null>(null);
   const [reviewResponse, setReviewResponse] = useState<ReviewResponse | null>(
@@ -550,15 +826,78 @@ export default function Home() {
   const [companyResearchError, setCompanyResearchError] = useState<string | null>(
     null,
   );
+  const [benchmarkResearch, setBenchmarkResearch] =
+    useState<BenchmarkResearchResponse | null>(null);
+  const [isResearchingBenchmark, setIsResearchingBenchmark] = useState(false);
+  const [benchmarkResearchError, setBenchmarkResearchError] = useState<
+    string | null
+  >(null);
+  const [savedDrafts, setSavedDrafts] = useState<SavedEssayDraft[]>([]);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "failed">(
+    "idle",
+  );
 
   const activeReview = reviewResponse ?? mockReviewResponse;
-  const canRunReview = essayText.trim().length > 0;
+  const isContextReady =
+    essayText.trim().length > 0 &&
+    applicationTarget.companyName.trim().length > 0 &&
+    applicationTarget.position.trim().length > 0;
+  const isCompanyReady = companyResearchStatus === "accepted";
+  const isBenchmarkReady = hasBenchmarkNotes(userContext);
+  const canRunReview = isContextReady && isCompanyReady && isBenchmarkReady;
+  const reviewBlockReason = getReviewBlockReason({
+    isContextReady,
+    isCompanyReady,
+    isBenchmarkReady,
+  });
   const openCount = Object.values(suggestionStatuses).filter(
     (status) => status === "unreviewed" || status === "revised",
   ).length;
   const acceptedCount = Object.values(suggestionStatuses).filter(
     (status) => status === "accepted" || status === "edited",
   ).length;
+  const workflowStatus: Record<PageId, WorkflowStatus> = {
+    library: "available",
+    context: isContextReady ? "done" : "next",
+    research: !isContextReady
+      ? "locked"
+      : isCompanyReady
+        ? "done"
+        : "next",
+    benchmark: !isContextReady || !isCompanyReady
+      ? "locked"
+      : isBenchmarkReady
+        ? "done"
+        : "next",
+    review: !canRunReview
+      ? "locked"
+      : reviewResponse
+        ? "done"
+        : "next",
+    suggestions: !reviewResponse
+      ? "locked"
+      : openCount > 0
+        ? "next"
+        : "done",
+    final: !reviewResponse
+      ? "locked"
+      : openCount === 0 || acceptedCount > 0
+        ? "next"
+        : "available",
+  };
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(savedEssaysStorageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as SavedEssayDraft[];
+      if (Array.isArray(parsed)) {
+        setSavedDrafts(parsed.map(normalizeSavedDraft));
+      }
+    } catch {
+      setSavedDrafts([]);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isResearchingCompany) {
@@ -575,6 +914,97 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [isResearchingCompany]);
 
+  useEffect(() => {
+    if (page !== "review" && page !== "suggestions") {
+      setDrawerItem(null);
+    }
+  }, [page]);
+
+  function normalizeSavedDraft(draft: SavedEssayDraft): SavedEssayDraft {
+    return {
+      ...draft,
+      userContext: normalizeUserContext(draft.userContext),
+      companyResearchStatus: draft.companyResearchStatus ?? "idle",
+      benchmarkResearch: draft.benchmarkResearch ?? null,
+    };
+  }
+
+  function persistSavedDrafts(nextDrafts: SavedEssayDraft[]) {
+    setSavedDrafts(nextDrafts);
+    window.localStorage.setItem(savedEssaysStorageKey, JSON.stringify(nextDrafts));
+  }
+
+  function buildSavedDraft(id?: string): SavedEssayDraft {
+    const existingId =
+      id ??
+      (selectedSampleId.startsWith("saved-") ? selectedSampleId : `saved-${Date.now()}`);
+    const companyLabel = applicationTarget.companyName || "応募先未設定";
+    const title = essayTitle.trim() || `${companyLabel}のES`;
+
+    return {
+      id: existingId,
+      title,
+      savedAt: new Date().toISOString(),
+      selectedSampleId,
+      essayTitle: title,
+      essaySourceType,
+      essayText,
+      finalDraft,
+      targetCount,
+      applicationTarget,
+      userContext: normalizeUserContext(userContext),
+      reviewRequest,
+      reviewResponse,
+      suggestionStatuses,
+      companyResearch,
+      acceptedCompanyResearch,
+      companyResearchStatus,
+      benchmarkResearch,
+    };
+  }
+
+  function saveCurrentEssay() {
+    try {
+      const draft = buildSavedDraft();
+      const nextDrafts = [
+        draft,
+        ...savedDrafts.filter((item) => item.id !== draft.id),
+      ].slice(0, 12);
+      persistSavedDrafts(nextDrafts);
+      setSelectedSampleId(draft.id);
+      setEssayTitle(draft.essayTitle);
+      setSaveStatus("saved");
+      window.setTimeout(() => setSaveStatus("idle"), 1800);
+    } catch {
+      setSaveStatus("failed");
+      window.setTimeout(() => setSaveStatus("idle"), 2200);
+    }
+  }
+
+  function loadSavedDraft(draft: SavedEssayDraft) {
+    const normalizedDraft = normalizeSavedDraft(draft);
+    setSelectedSampleId(normalizedDraft.id);
+    setEssayTitle(normalizedDraft.essayTitle);
+    setEssaySourceType(normalizedDraft.essaySourceType);
+    setEssayText(normalizedDraft.essayText);
+    setFinalDraft(normalizedDraft.finalDraft);
+    setTargetCount(normalizedDraft.targetCount);
+    setApplicationTarget(normalizedDraft.applicationTarget);
+    setUserContext(normalizedDraft.userContext);
+    setReviewRequest(normalizedDraft.reviewRequest);
+    setReviewResponse(normalizedDraft.reviewResponse);
+    setSuggestionStatuses(normalizedDraft.suggestionStatuses);
+    setCompanyResearch(normalizedDraft.companyResearch);
+    setAcceptedCompanyResearch(normalizedDraft.acceptedCompanyResearch);
+    setCompanyResearchStatus(normalizedDraft.companyResearchStatus);
+    setBenchmarkResearch(normalizedDraft.benchmarkResearch);
+    setDrawerItem(null);
+    setReviewError(null);
+    setCompanyResearchError(null);
+    setBenchmarkResearchError(null);
+    setPage("context");
+  }
+
   function loadSample(sample: SampleEssay) {
     setSelectedSampleId(sample.id);
     setEssayTitle(sample.title);
@@ -586,7 +1016,7 @@ export default function Home() {
     setIsExtractingDocument(false);
     setTargetCount(sample.targetCharacterCount);
     setApplicationTarget(sample.applicationTarget);
-    setUserContext(sample.userContext);
+    setUserContext(normalizeUserContext(sample.userContext));
     setReviewRequest(null);
     setReviewResponse(null);
     setDrawerItem(null);
@@ -599,6 +1029,9 @@ export default function Home() {
     setAcceptedCompanyResearch(null);
     setCompanyResearchStatus("idle");
     setCompanyResearchError(null);
+    setBenchmarkResearch(null);
+    setBenchmarkResearchError(null);
+    setIsResearchingBenchmark(false);
     setPage("context");
   }
 
@@ -626,21 +1059,33 @@ export default function Home() {
     setAcceptedCompanyResearch(null);
     setCompanyResearchStatus("idle");
     setCompanyResearchError(null);
+    setBenchmarkResearch(null);
+    setBenchmarkResearchError(null);
+    setIsResearchingBenchmark(false);
     setPage("context");
   }
 
   async function runCompanyResearch() {
-    if (!applicationTarget.companyName.trim()) {
+    const normalizedTarget = normalizeApplicationTarget(applicationTarget);
+    if (!normalizedTarget.companyName.trim()) {
       setCompanyResearchError("企業名を入力してから調査を実行してください。");
       return;
     }
+    if (normalizedTarget !== applicationTarget) {
+      setApplicationTarget(normalizedTarget);
+    }
 
     setCompanyResearchError(null);
+    setCompanyResearch(null);
+    setAcceptedCompanyResearch(null);
+    setCompanyResearchStatus("idle");
     setCompanyResearchProgressIndex(0);
     setIsResearchingCompany(true);
 
     try {
-      const response = await requestCompanyResearch({ applicationTarget });
+      const response = await requestCompanyResearch({
+        applicationTarget: normalizedTarget,
+      });
       setCompanyResearch(response);
       setCompanyResearchStatus("pending");
     } catch (error) {
@@ -673,8 +1118,11 @@ export default function Home() {
     }));
     setCompanyResearchStatus("accepted");
     setAcceptedCompanyResearch(companyResearch);
+    setBenchmarkResearch(null);
+    setBenchmarkResearchError(null);
     setReviewResponse(null);
     setReviewRequest(null);
+    setPage("benchmark");
   }
 
   function discardCompanyResearch() {
@@ -682,6 +1130,49 @@ export default function Home() {
     setAcceptedCompanyResearch(null);
     setCompanyResearchStatus("idle");
     setCompanyResearchError(null);
+    setBenchmarkResearch(null);
+    setBenchmarkResearchError(null);
+  }
+
+  async function runBenchmarkResearch() {
+    const normalizedTarget = normalizeApplicationTarget(applicationTarget);
+    if (!normalizedTarget.companyName.trim()) {
+      setBenchmarkResearchError("企業名を入力してから参考ESベンチマークを作成してください。");
+      return;
+    }
+    setApplicationTarget(normalizedTarget);
+    if (companyResearchStatus !== "accepted") {
+      setBenchmarkResearchError("企業調査を採用してから参考ESベンチマークを作成してください。");
+      setPage("research");
+      return;
+    }
+
+    setBenchmarkResearchError(null);
+    setIsResearchingBenchmark(true);
+
+    try {
+      const response = await requestBenchmarkResearch({
+        applicationTarget: normalizedTarget,
+        acceptedCompanyResearch,
+      });
+      setBenchmarkResearch(response);
+      setUserContext((current) => ({
+        ...normalizeUserContext(current),
+        benchmarkNotes: response.benchmarkNotes,
+      }));
+      setReviewResponse(null);
+      setReviewRequest(null);
+      setDrawerItem(null);
+      setSuggestionStatuses({});
+    } catch (error) {
+      setBenchmarkResearchError(
+        error instanceof Error
+          ? error.message
+          : "参考ESベンチマークの生成に失敗しました。",
+      );
+    } finally {
+      setIsResearchingBenchmark(false);
+    }
   }
 
   function handleEssayTextChange(value: string) {
@@ -752,9 +1243,16 @@ export default function Home() {
 
   async function runReview() {
     if (!canRunReview) {
-      setReviewError("ES本文を入力してからレビューを実行してください。");
-      setPage("context");
+      setReviewError(reviewBlockReason || "レビューに必要な前提情報が不足しています。");
+      setPage(
+        !isContextReady ? "context" : !isCompanyReady ? "research" : "benchmark",
+      );
       return;
+    }
+
+    const normalizedTarget = normalizeApplicationTarget(applicationTarget);
+    if (normalizedTarget !== applicationTarget) {
+      setApplicationTarget(normalizedTarget);
     }
 
     const request = createReviewRequest({
@@ -763,8 +1261,8 @@ export default function Home() {
       rawText: essayText,
       sourceType: essaySourceType,
       targetCharacterCount: targetCount,
-      applicationTarget,
-      userContext,
+      applicationTarget: normalizedTarget,
+      userContext: normalizeUserContext(userContext),
       reviewCriteria: criteria,
     });
 
@@ -811,24 +1309,27 @@ export default function Home() {
   function applySuggestion(suggestion: Suggestion, replacement?: string) {
     const nextText = replacement ?? suggestion.diffHint.after;
     setFinalDraft((current) => {
-      if (current.includes(nextText)) return current;
+      if (current.includes(nextText)) return removeDuplicateJapaneseSentences(current);
       if (current.includes(suggestion.diffHint.before)) {
-        return current.replace(suggestion.diffHint.before, nextText);
+        return removeDuplicateJapaneseSentences(
+          current.replace(suggestion.diffHint.before, nextText),
+        );
       }
       const partialReplacement = applyPartialDiff(
         current,
         suggestion.diffHint.before,
         nextText,
       );
-      if (partialReplacement) return partialReplacement;
-      return `${current.trim()}\n\n${nextText}`.trim();
+      if (partialReplacement) {
+        return removeDuplicateJapaneseSentences(partialReplacement);
+      }
+      return removeDuplicateJapaneseSentences(current);
     });
   }
 
   function acceptSuggestion(suggestion: Suggestion) {
     applySuggestion(suggestion);
     updateSuggestionStatus(suggestion.id, "accepted");
-    setPage("final");
   }
 
   function rejectSuggestion(suggestion: Suggestion) {
@@ -840,7 +1341,6 @@ export default function Home() {
     if (!edited) return;
     applySuggestion(suggestion, edited);
     updateSuggestionStatus(suggestion.id, "edited");
-    setPage("final");
   }
 
   async function addDiscussionNote(suggestion: Suggestion) {
@@ -937,6 +1437,8 @@ export default function Home() {
           companyName={applicationTarget.companyName}
           isReviewing={isReviewing}
           canRunReview={canRunReview}
+          reviewBlockReason={reviewBlockReason}
+          workflowStatus={workflowStatus}
           onRunReview={runReview}
           onNewReview={startNewEssayReview}
           openCount={openCount}
@@ -955,6 +1457,8 @@ export default function Home() {
             reviewResponse={reviewResponse}
             characterCount={essayText.length}
             targetCount={targetCount}
+            saveStatus={saveStatus}
+            onSave={saveCurrentEssay}
           />
 
           <div
@@ -964,10 +1468,20 @@ export default function Home() {
                 : "grid-cols-[minmax(0,1fr)]"
             }`}
           >
-            <div className="min-h-0 overflow-y-auto bg-white">
+            <div key={page} className="sidus-page-transition min-h-0 overflow-y-auto bg-white">
+              {page === "library" && (
+                <LibraryPage
+                  selectedSampleId={selectedSampleId}
+                  savedDrafts={savedDrafts}
+                  saveStatus={saveStatus}
+                  onSaveCurrentEssay={saveCurrentEssay}
+                  onLoadSavedDraft={loadSavedDraft}
+                  onLoadSample={loadSample}
+                />
+              )}
+
               {page === "context" && (
                 <ContextPage
-                  selectedSampleId={selectedSampleId}
                   essayText={essayText}
                   essaySourceType={essaySourceType}
                   documentExtraction={documentExtraction}
@@ -981,9 +1495,9 @@ export default function Home() {
                   setApplicationTarget={setApplicationTarget}
                   userContext={userContext}
                   setUserContext={setUserContext}
+                  acceptedCompanyResearch={acceptedCompanyResearch}
                   targetCount={targetCount}
                   setTargetCount={setTargetCount}
-                  onLoadSample={loadSample}
                   companyResearchStatus={companyResearchStatus}
                   onOpenCompanyResearch={() => setPage("research")}
                 />
@@ -1003,6 +1517,21 @@ export default function Home() {
                   onRunCompanyResearch={runCompanyResearch}
                   onAcceptCompanyResearch={acceptCompanyResearch}
                   onDiscardCompanyResearch={discardCompanyResearch}
+                />
+              )}
+
+              {page === "benchmark" && (
+                <BenchmarkPage
+                  applicationTarget={applicationTarget}
+                  userContext={userContext}
+                  setUserContext={setUserContext}
+                  companyResearchStatus={companyResearchStatus}
+                  acceptedCompanyResearch={acceptedCompanyResearch}
+                  benchmarkResearch={benchmarkResearch}
+                  isResearchingBenchmark={isResearchingBenchmark}
+                  benchmarkResearchError={benchmarkResearchError}
+                  onOpenCompanyResearch={() => setPage("research")}
+                  onRunBenchmarkResearch={runBenchmarkResearch}
                 />
               )}
 
@@ -1067,6 +1596,8 @@ function AppNav({
   companyName,
   isReviewing,
   canRunReview,
+  reviewBlockReason,
+  workflowStatus,
   onRunReview,
   onNewReview,
   openCount,
@@ -1081,6 +1612,8 @@ function AppNav({
   companyName: string;
   isReviewing: boolean;
   canRunReview: boolean;
+  reviewBlockReason: string;
+  workflowStatus: Record<PageId, WorkflowStatus>;
   onRunReview: () => void;
   onNewReview: () => void;
   openCount: number;
@@ -1092,7 +1625,7 @@ function AppNav({
 }) {
   return (
     <aside
-      className="relative shrink-0 border-r border-[#1d3552] bg-[#0b1220] text-[#eef4fb] shadow-[12px_0_32px_rgba(15,23,42,0.08)]"
+      className="relative shrink-0 border-r border-[#1d3552] bg-[#0b1220] text-[#eef4fb] shadow-[12px_0_32px_rgba(15,23,42,0.08)] transition-[width] duration-200 ease-out"
       style={{ width: isCollapsed ? collapsedNavWidth : width }}
     >
       <div className={`border-b border-white/10 ${isCollapsed ? "p-3" : "p-4"}`}>
@@ -1145,11 +1678,11 @@ function AppNav({
                 ? "レビュー中"
                 : canRunReview
                   ? "レビューを実行"
-                  : "ES本文を入力"}
+                  : "準備中"}
             </button>
             {!canRunReview && (
               <p className="mt-2 text-xs leading-5 text-[#f7d58a]">
-                新しい校正では、まず中央のES本文欄に本文を貼ってください。
+                {reviewBlockReason}
               </p>
             )}
           </>
@@ -1187,6 +1720,7 @@ function AppNav({
             isCollapsed={isCollapsed}
             openCount={openCount}
             acceptedCount={acceptedCount}
+            status={workflowStatus[item.id]}
             onClick={() => setPage(item.id)}
           />
         ))}
@@ -1212,6 +1746,7 @@ function NavButton({
   isCollapsed,
   openCount,
   acceptedCount,
+  status,
   onClick,
 }: {
   item: (typeof navItems)[number];
@@ -1219,9 +1754,12 @@ function NavButton({
   isCollapsed: boolean;
   openCount: number;
   acceptedCount: number;
+  status: WorkflowStatus;
   onClick: () => void;
 }) {
   const Icon = item.icon;
+  const locked = status === "locked";
+  const isNext = status === "next";
   const count =
     item.id === "suggestions"
       ? openCount
@@ -1233,12 +1771,17 @@ function NavButton({
     <button
       type="button"
       onClick={onClick}
+      disabled={locked}
       title={isCollapsed ? item.label : undefined}
       className={`group relative flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition ${
         active
           ? "bg-white/12 text-white shadow-sm"
-          : "text-[#b7c5d6] hover:bg-white/8 hover:text-white"
-      } ${isCollapsed ? "justify-center px-0" : ""}`}
+          : isNext
+            ? "border border-[#79b8ff]/50 bg-[#10233b] text-white shadow-[0_0_0_1px_rgba(125,184,255,0.22),0_0_18px_rgba(125,184,255,0.22)]"
+            : locked
+              ? "cursor-not-allowed text-[#5f6f83]"
+              : "text-[#b7c5d6] hover:bg-white/8 hover:text-white"
+      } ${isNext ? "sidus-next-step" : ""} ${isCollapsed ? "justify-center px-0" : ""}`}
     >
       <Icon size={16} />
       {!isCollapsed && (
@@ -1247,6 +1790,11 @@ function NavButton({
           <span className="mt-1 block text-xs text-[#8fa1b6]">
             {item.description}
           </span>
+        </span>
+      )}
+      {!isCollapsed && isNext && (
+        <span className="rounded-md bg-[#d8e8ff] px-1.5 py-0.5 text-[10px] font-semibold text-[#0b1220]">
+          NEXT
         </span>
       )}
       {count !== null && (
@@ -1316,6 +1864,8 @@ function TopBar({
   reviewResponse,
   characterCount,
   targetCount,
+  saveStatus,
+  onSave,
 }: {
   page: PageId;
   companyName: string;
@@ -1323,6 +1873,8 @@ function TopBar({
   reviewResponse: ReviewResponse | null;
   characterCount: number;
   targetCount: number;
+  saveStatus: "idle" | "saved" | "failed";
+  onSave: () => void;
 }) {
   const title = navItems.find((item) => item.id === page)?.label ?? "Sidus";
   const remainingCharacters = targetCount - characterCount;
@@ -1348,6 +1900,20 @@ function TopBar({
         </h1>
       </div>
       <div className="hidden min-w-0 items-center gap-3 text-xs text-[#52525b] md:flex">
+        <button
+          type="button"
+          onClick={onSave}
+          className={`inline-flex items-center gap-1.5 rounded-md border border-[#d4d4d8] bg-white px-2.5 py-1 font-semibold text-[#18181b] transition hover:bg-[#f8fafc] ${
+            saveStatus === "saved" ? "sidus-pop border-[#86efac] bg-[#f0fdf4] text-[#14532d]" : ""
+          }`}
+        >
+          <Save size={13} />
+          {saveStatus === "saved"
+            ? "保存済み"
+            : saveStatus === "failed"
+              ? "保存失敗"
+              : "保存"}
+        </button>
         <span
           className={`rounded-md px-2.5 py-1 font-semibold ${
             reviewResponse
@@ -1375,7 +1941,6 @@ function TopBar({
 }
 
 function ContextPage({
-  selectedSampleId,
   essayText,
   essaySourceType,
   documentExtraction,
@@ -1389,13 +1954,12 @@ function ContextPage({
   setApplicationTarget,
   userContext,
   setUserContext,
+  acceptedCompanyResearch,
   targetCount,
   setTargetCount,
-  onLoadSample,
   companyResearchStatus,
   onOpenCompanyResearch,
 }: {
-  selectedSampleId: string;
   essayText: string;
   essaySourceType: EssaySourceType;
   documentExtraction: DocumentExtractionResult | null;
@@ -1409,12 +1973,19 @@ function ContextPage({
   setApplicationTarget: (target: ApplicationTarget) => void;
   userContext: UserContext;
   setUserContext: (context: UserContext) => void;
+  acceptedCompanyResearch: CompanyResearchResponse | null;
   targetCount: number;
   setTargetCount: (count: number) => void;
-  onLoadSample: (sample: SampleEssay) => void;
   companyResearchStatus: CompanyResearchStatus;
   onOpenCompanyResearch: () => void;
 }) {
+  const reusableRisk = getReusableCompanyRisk(essayText, applicationTarget);
+  const directionSuggestions = createEssayDirectionSuggestions({
+    applicationTarget,
+    userContext,
+    acceptedCompanyResearch,
+  });
+
   function updateTarget<K extends keyof ApplicationTarget>(
     key: K,
     value: ApplicationTarget[K],
@@ -1429,6 +2000,20 @@ function ContextPage({
     setUserContext({ ...userContext, [key]: value });
   }
 
+  function updateTargetCount(value: string) {
+    const numericValue = Number(value.replace(/[^\d]/g, ""));
+    setTargetCount(Number.isFinite(numericValue) ? numericValue : 0);
+  }
+
+  function applyDirectionSuggestion(direction: EssayDirectionSuggestion) {
+    setUserContext({
+      ...normalizeUserContext(userContext),
+      motivationAxis: direction.motivationAxis,
+      selfPr: direction.selfPr,
+      studentExperience: direction.studentExperience,
+    });
+  }
+
   return (
     <PageBody>
       <PageHeader
@@ -1439,12 +2024,31 @@ function ContextPage({
 
       {essayText.trim().length === 0 && (
         <div className="mb-4 rounded-md border border-[#f0c36a] bg-[#fff8e1] px-4 py-3 text-sm leading-6 text-[#7c4a03]">
-          新しいES校正を始めました。まずES本文欄に本文を貼ると、左のレビューボタンが有効になります。
+          まず設問条件とES本文を入力してください。入力後は、企業調査、参考ES、レビューの順に進みます。
         </div>
       )}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <section>
+          <div className="mb-4 rounded-md border border-[#e4e4e7] bg-[#fafafa] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <SectionHeader title="設問条件" icon={PenLine} />
+                <p className="mt-2 text-xs leading-5 text-[#71717a]">
+                  企業ごとの指定字数を先に設定します。レビューと最終稿はこの文字数を基準にします。
+                </p>
+              </div>
+              <div className="w-full sm:w-44">
+                <Field
+                  label="目標文字数"
+                  value={targetCount > 0 ? String(targetCount) : ""}
+                  onChange={updateTargetCount}
+                  placeholder="例: 400"
+                />
+              </div>
+            </div>
+          </div>
+
           <SectionHeader title="ES本文" icon={FileText} />
           <DocumentIntakePanel
             essaySourceType={essaySourceType}
@@ -1461,11 +2065,197 @@ function ContextPage({
             placeholder="ここにES本文を貼ってください。例: 志望動機、ガクチカ、自己PRなど。"
             className="mt-3 min-h-[560px] w-full resize-none rounded-md border border-[#e4e4e7] bg-white px-4 py-4 text-[15px] leading-8 outline-none focus:border-[#18181b]"
           />
+          {reusableRisk && (
+            <div className="mt-3 rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-3">
+              <p className="text-sm font-semibold text-[#7c4a03]">
+                この文は他社にも使い回せる可能性があります
+              </p>
+              <p className="mt-1 text-xs leading-5 text-[#7c4a03]">
+                理由: {reusableRisk.reason}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {reusableRisk.matchedTerms.slice(0, 5).map((term) => (
+                  <span
+                    key={term}
+                    className="rounded-md bg-white px-2 py-0.5 text-[11px] font-semibold text-[#7c4a03]"
+                  >
+                    検出: {term}
+                  </span>
+                ))}
+                {reusableRisk.genericSignals.slice(0, 4).map((term) => (
+                  <span
+                    key={term}
+                    className="rounded-md border border-[#f0c36a] px-2 py-0.5 text-[11px] font-semibold text-[#7c4a03]"
+                  >
+                    汎用表現: {term}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         <aside className="space-y-6">
           <section>
-            <SectionHeader title="サンプル" icon={FileText} />
+            <SectionHeader title="応募先" icon={ShieldCheck} />
+            <div className="mt-3 space-y-3">
+              <CompanyIdentityCard
+                applicationTarget={applicationTarget}
+                status={companyResearchStatus}
+              />
+              <CompanyScopeControl
+                value={applicationTarget.companyScope ?? "auto"}
+                onChange={(value) => updateTarget("companyScope", value)}
+              />
+              <Field label="業界" value={applicationTarget.industry} onChange={(value) => updateTarget("industry", value)} />
+              <Field label="企業名" value={applicationTarget.companyName} onChange={(value) => updateTarget("companyName", value)} />
+              <Field label="職種" value={applicationTarget.position} onChange={(value) => updateTarget("position", value)} />
+              <Field
+                label="法人番号"
+                value={applicationTarget.corporateNumber ?? ""}
+                onChange={(value) => updateTarget("corporateNumber", value)}
+              />
+              <TextArea label="企業メモ" value={applicationTarget.companyMemo} onChange={(value) => updateTarget("companyMemo", value)} />
+              <button
+                type="button"
+                onClick={onOpenCompanyResearch}
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white hover:bg-[#27272a]"
+              >
+                <ShieldCheck size={14} />
+                企業調査ページへ
+              </button>
+            </div>
+          </section>
+
+          <section>
+            <SectionHeader title="本人文脈" icon={PenLine} />
+            <div className="mt-3 space-y-2">
+              {directionSuggestions.map((direction) => (
+                <button
+                  key={direction.id}
+                  type="button"
+                  onClick={() => applyDirectionSuggestion(direction)}
+                  className="w-full rounded-md border border-[#e4e4e7] bg-[#fafafa] px-3 py-2 text-left hover:bg-white"
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-[#18181b]">
+                      {direction.title}
+                    </span>
+                    <span className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold text-[#52525b]">
+                      {direction.evidenceLabel}
+                    </span>
+                  </span>
+                  <span className="mt-1 block text-xs leading-5 text-[#71717a]">
+                    {direction.reason}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 space-y-3">
+              <Field label="志望軸" value={userContext.motivationAxis} onChange={(value) => updateContext("motivationAxis", value)} />
+              <Field label="自己PR" value={userContext.selfPr} onChange={(value) => updateContext("selfPr", value)} />
+              <TextArea label="ガクチカ" value={userContext.studentExperience} onChange={(value) => updateContext("studentExperience", value)} />
+            </div>
+          </section>
+
+        </aside>
+      </div>
+    </PageBody>
+  );
+}
+
+function LibraryPage({
+  selectedSampleId,
+  savedDrafts,
+  saveStatus,
+  onSaveCurrentEssay,
+  onLoadSavedDraft,
+  onLoadSample,
+}: {
+  selectedSampleId: string;
+  savedDrafts: SavedEssayDraft[];
+  saveStatus: "idle" | "saved" | "failed";
+  onSaveCurrentEssay: () => void;
+  onLoadSavedDraft: (draft: SavedEssayDraft) => void;
+  onLoadSample: (sample: SampleEssay) => void;
+}) {
+  return (
+    <PageBody wide>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <PageHeader
+          label="保存ファイル"
+          title="保存済みESとサンプル"
+          description="保存したES一式を復元したり、サンプルから作業を始めたりできます。"
+        />
+        <button
+          type="button"
+          onClick={onSaveCurrentEssay}
+          className="inline-flex items-center justify-center gap-2 rounded-md bg-[#18181b] px-4 py-2 text-sm font-semibold text-white hover:bg-[#27272a]"
+        >
+          <Save size={14} />
+          {saveStatus === "saved"
+            ? "保存しました"
+            : saveStatus === "failed"
+              ? "保存できませんでした"
+              : "現在のESを保存"}
+        </button>
+      </div>
+
+      <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <section>
+          <SectionHeader title="保存済みES" icon={Save} />
+          {savedDrafts.length === 0 ? (
+            <p className="mt-3 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-4 py-5 text-sm leading-6 text-[#475569]">
+              保存したESはまだありません。レビュー中でも上の保存ボタンから保存できます。
+            </p>
+          ) : (
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              {savedDrafts.map((draft) => (
+                <button
+                  key={draft.id}
+                  type="button"
+                  onClick={() => onLoadSavedDraft(draft)}
+                  className={`rounded-md border px-4 py-3 text-left hover:bg-white ${
+                    selectedSampleId === draft.id
+                      ? "border-[#18181b] bg-white"
+                      : "border-[#e4e4e7] bg-[#fafafa]"
+                  }`}
+                >
+                  <span className="block text-sm font-semibold">
+                    {draft.title}
+                  </span>
+                  <span className="mt-1 block text-xs text-[#71717a]">
+                    {draft.applicationTarget.companyName || "応募先未設定"}
+                    {draft.applicationTarget.position
+                      ? ` / ${draft.applicationTarget.position}`
+                      : ""}
+                  </span>
+                  <span className="mt-3 grid grid-cols-3 gap-2 text-xs text-[#52525b]">
+                    <Metric label="本文" value={`${draft.essayText.length}字`} />
+                    <Metric label="目標" value={`${draft.targetCount}字`} />
+                    <Metric
+                      label="レビュー"
+                      value={draft.reviewResponse ? "あり" : "なし"}
+                    />
+                  </span>
+                  <span className="mt-3 block text-xs text-[#71717a]">
+                    保存:{" "}
+                    {new Date(draft.savedAt).toLocaleString("ja-JP", {
+                      year: "numeric",
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <aside>
+          <SectionHeader title="サンプルES" icon={FileText} />
             <div className="mt-3 space-y-2">
               {sampleEssays.map((sample) => (
                 <button
@@ -1484,40 +2274,7 @@ function ContextPage({
                   </span>
                 </button>
               ))}
-            </div>
-          </section>
-
-          <section>
-            <SectionHeader title="応募先" icon={ShieldCheck} />
-            <div className="mt-3 space-y-3">
-              <CompanyIdentityCard
-                applicationTarget={applicationTarget}
-                status={companyResearchStatus}
-              />
-              <Field label="業界" value={applicationTarget.industry} onChange={(value) => updateTarget("industry", value)} />
-              <Field label="企業名" value={applicationTarget.companyName} onChange={(value) => updateTarget("companyName", value)} />
-              <Field label="職種" value={applicationTarget.position} onChange={(value) => updateTarget("position", value)} />
-              <TextArea label="企業メモ" value={applicationTarget.companyMemo} onChange={(value) => updateTarget("companyMemo", value)} />
-              <button
-                type="button"
-                onClick={onOpenCompanyResearch}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white hover:bg-[#27272a]"
-              >
-                <ShieldCheck size={14} />
-                企業調査ページへ
-              </button>
-            </div>
-          </section>
-
-          <section>
-            <SectionHeader title="本人文脈" icon={PenLine} />
-            <div className="mt-3 space-y-3">
-              <Field label="志望軸" value={userContext.motivationAxis} onChange={(value) => updateContext("motivationAxis", value)} />
-              <Field label="自己PR" value={userContext.selfPr} onChange={(value) => updateContext("selfPr", value)} />
-              <TextArea label="ガクチカ" value={userContext.studentExperience} onChange={(value) => updateContext("studentExperience", value)} />
-              <Field label="目標文字数" value={String(targetCount)} onChange={(value) => setTargetCount(Number(value) || 0)} />
-            </div>
-          </section>
+          </div>
         </aside>
       </div>
     </PageBody>
@@ -1603,7 +2360,7 @@ function CompanyResearchPage({
       <PageHeader
         label="企業調査"
         title="企業調査"
-        description="参照元URLを指定し、公式・日経会社情報・公的情報を優先してESレビューの前提を作ります。"
+        description="参照元URLを指定し、公式・公的情報・日経系の会社情報URL候補を優先してESレビューの前提を作ります。"
       />
 
       <div className="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -1613,6 +2370,10 @@ function CompanyResearchPage({
             <CompanyIdentityCard
               applicationTarget={applicationTarget}
               status={companyResearchStatus}
+            />
+            <CompanyScopeControl
+              value={applicationTarget.companyScope ?? "auto"}
+              onChange={(value) => updateTarget("companyScope", value)}
             />
             <Field
               label="業界"
@@ -1628,6 +2389,11 @@ function CompanyResearchPage({
               label="職種"
               value={applicationTarget.position}
               onChange={(value) => updateTarget("position", value)}
+            />
+            <Field
+              label="法人番号"
+              value={applicationTarget.corporateNumber ?? ""}
+              onChange={(value) => updateTarget("corporateNumber", value)}
             />
             <TextArea
               label="企業メモ"
@@ -1662,7 +2428,7 @@ function CompanyResearchPage({
               <div>
                 <SectionHeader title="調査実行" icon={SearchCheck} />
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-[#71717a]">
-                  指定URL、日経会社情報、公的情報、公式サイトの順に確認します。
+                  指定URL、公式サイト、公的情報、日経系の会社情報URL候補を確認します。
                 </p>
               </div>
               <button
@@ -1702,6 +2468,232 @@ function CompanyResearchPage({
           ) : (
             <div className="rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-6 text-sm leading-6 text-[#475569]">
               企業調査を実行すると、固定欄、出典、未確認事項、ESレビューで見る観点をここに表示します。
+            </div>
+          )}
+        </section>
+      </div>
+    </PageBody>
+  );
+}
+
+function BenchmarkPage({
+  applicationTarget,
+  userContext,
+  setUserContext,
+  companyResearchStatus,
+  acceptedCompanyResearch,
+  benchmarkResearch,
+  isResearchingBenchmark,
+  benchmarkResearchError,
+  onOpenCompanyResearch,
+  onRunBenchmarkResearch,
+}: {
+  applicationTarget: ApplicationTarget;
+  userContext: UserContext;
+  setUserContext: (context: UserContext) => void;
+  companyResearchStatus: CompanyResearchStatus;
+  acceptedCompanyResearch: CompanyResearchResponse | null;
+  benchmarkResearch: BenchmarkResearchResponse | null;
+  isResearchingBenchmark: boolean;
+  benchmarkResearchError: string | null;
+  onOpenCompanyResearch: () => void;
+  onRunBenchmarkResearch: () => void;
+}) {
+  const normalizedContext = normalizeUserContext(userContext);
+  const benchmarkNotes = normalizedContext.benchmarkNotes ?? {
+    passedEssayPatterns: "",
+    strongPhrases: "",
+    weakGenericPhrases: "",
+    structureHints: "",
+  };
+  const companyReady = companyResearchStatus === "accepted";
+
+  function updateBenchmarkNote(
+    key: keyof NonNullable<UserContext["benchmarkNotes"]>,
+    value: string,
+  ) {
+    setUserContext({
+      ...normalizedContext,
+      benchmarkNotes: {
+        ...benchmarkNotes,
+        [key]: value,
+      },
+    });
+  }
+
+  return (
+    <PageBody wide>
+      <PageHeader
+        label="参考ES"
+        title="参考ESベンチマーク"
+        description="通過ES本文をコピーせず、構成・語彙・弱い汎用表現だけをレビュー基準に変換します。"
+      />
+
+      <div className="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
+        <section className="space-y-4">
+          <div className="rounded-md border border-[#e4e4e7] bg-white p-4">
+            <SectionHeader title="実行条件" icon={SearchCheck} />
+            <div className="mt-3 space-y-3">
+              <CompanyIdentityCard
+                applicationTarget={applicationTarget}
+                status={companyResearchStatus}
+                compact
+              />
+              {!companyReady && (
+                <div className="rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-3 text-xs leading-5 text-[#7c4a03]">
+                  まず企業調査を採用してください。参考ESの型は、採用済みの企業理解を前提に作ります。
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={onRunBenchmarkResearch}
+                disabled={isResearchingBenchmark || !companyReady}
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white hover:bg-[#27272a] disabled:cursor-not-allowed disabled:bg-[#8b948f]"
+              >
+                <SearchCheck size={14} />
+                {isResearchingBenchmark ? "参考ESを調査中" : "参考ESの型を自動生成"}
+              </button>
+              {!companyReady && (
+                <button
+                  type="button"
+                  onClick={onOpenCompanyResearch}
+                  className="flex w-full items-center justify-center gap-2 rounded-md border border-[#d4d4d8] bg-white px-3 py-2 text-sm font-semibold text-[#18181b] hover:bg-[#f8fafc]"
+                >
+                  <ShieldCheck size={14} />
+                  企業調査へ戻る
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-md border border-[#dbeafe] bg-[#f8fbff] p-4">
+            <p className="text-sm font-semibold text-[#1d4ed8]">扱い方</p>
+            <p className="mt-2 text-xs leading-5 text-[#334155]">
+              ワンキャリア等の通過ES本文は転載せず、設問への入り方、企業理解の接続、強い語彙、避けるべき汎用表現だけを抽出します。
+            </p>
+            <p className="mt-2 text-xs leading-5 text-[#334155]">
+              ここで作ったメモは、レビューと最終稿の企業適合・語彙品質に強く反映します。
+            </p>
+          </div>
+
+          {acceptedCompanyResearch && (
+            <div className="rounded-md border border-[#e4e4e7] bg-white p-4">
+              <p className="text-sm font-semibold text-[#18181b]">
+                採用済み企業理解
+              </p>
+              <p className="mt-2 line-clamp-6 text-xs leading-5 text-[#52525b]">
+                {acceptedCompanyResearch.companyUnderstandingMemo}
+              </p>
+            </div>
+          )}
+
+          {benchmarkResearchError && (
+            <p className="rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]">
+              {benchmarkResearchError}
+            </p>
+          )}
+        </section>
+
+        <section className="min-w-0 space-y-4">
+          {isResearchingBenchmark && (
+            <div className="rounded-md border border-[#dbeafe] bg-[#f8fbff] px-4 py-4">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full border border-[#93c5fd] bg-white">
+                  <span className="size-2 animate-pulse rounded-full bg-[#2563eb]" />
+                </span>
+                <div>
+                  <p className="text-sm font-semibold text-[#1d4ed8]">
+                    参考ESの構成を探索中
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-[#334155]">
+                    通過ES本文の再現を避けながら、公開情報から型・語彙・弱い表現だけを抽出しています。
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-md border border-[#e4e4e7] bg-white p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <SectionHeader title="ベンチマークメモ" icon={FileText} />
+              {benchmarkResearch && (
+                <span className="rounded-md bg-[#e7f5ea] px-2 py-1 text-xs font-semibold text-[#14532d]">
+                  自動生成済み
+                </span>
+              )}
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <TextArea
+                label="通過ESの型"
+                value={benchmarkNotes.passedEssayPatterns}
+                onChange={(value) => updateBenchmarkNote("passedEssayPatterns", value)}
+              />
+              <TextArea
+                label="強い語彙・言い回し"
+                value={benchmarkNotes.strongPhrases}
+                onChange={(value) => updateBenchmarkNote("strongPhrases", value)}
+              />
+              <TextArea
+                label="弱い汎用表現"
+                value={benchmarkNotes.weakGenericPhrases}
+                onChange={(value) => updateBenchmarkNote("weakGenericPhrases", value)}
+              />
+              <TextArea
+                label="構成ヒント"
+                value={benchmarkNotes.structureHints}
+                onChange={(value) => updateBenchmarkNote("structureHints", value)}
+              />
+            </div>
+          </div>
+
+          {benchmarkResearch && (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="rounded-md border border-[#e4e4e7] bg-white p-4">
+                <SectionHeader title="参照ソース" icon={Link2} />
+                {benchmarkResearch.sources.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {benchmarkResearch.sources.map((source) => (
+                      <a
+                        key={`${source.title}-${source.url}`}
+                        href={source.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block rounded-md border border-[#e4e4e7] bg-[#fafafa] px-3 py-2 hover:border-[#18181b] hover:bg-white"
+                      >
+                        <span className="block text-sm font-semibold text-[#18181b]">
+                          {source.title}
+                        </span>
+                        <span className="mt-1 block text-xs text-[#71717a]">
+                          {getSourceDomain(source.url)}
+                        </span>
+                        {source.note && (
+                          <span className="mt-2 block text-xs leading-5 text-[#52525b]">
+                            {source.note}
+                          </span>
+                        )}
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 rounded-md border border-dashed border-[#cbd5e1] bg-[#f8fafc] px-3 py-3 text-xs leading-5 text-[#475569]">
+                    検索なしの雛形、または参照ソース未取得の結果です。必要なら手動メモで補強してください。
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-md border border-[#e4e4e7] bg-white p-4">
+                <SectionHeader title="注意事項" icon={CircleAlert} />
+                <div className="mt-3 space-y-2">
+                  {benchmarkResearch.warnings.map((warning) => (
+                    <p
+                      key={warning}
+                      className="rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]"
+                    >
+                      {warning}
+                    </p>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -1894,11 +2886,78 @@ function CompanyIdentityCard({
             <span className="rounded-md bg-[#f4f4f5] px-2 py-1">
               ドメイン: {domain || "未設定"}
             </span>
+            {applicationTarget.corporateNumber && (
+              <span className="rounded-md bg-[#e7f5ea] px-2 py-1 text-[#14532d]">
+                法人番号: {applicationTarget.corporateNumber}
+              </span>
+            )}
             <span className="rounded-md bg-[#f4f4f5] px-2 py-1">
               ロゴ取得: {domain ? "候補あり" : "未確認"}
             </span>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function CompanyScopeControl({
+  value,
+  onChange,
+}: {
+  value: NonNullable<ApplicationTarget["companyScope"]>;
+  onChange: (value: NonNullable<ApplicationTarget["companyScope"]>) => void;
+}) {
+  const options: Array<{
+    value: NonNullable<ApplicationTarget["companyScope"]>;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: "auto",
+      label: "自動判定",
+      description: "社名とURLから国内法人/外資ブランドを推定",
+    },
+    {
+      value: "domestic",
+      label: "国内法人",
+      description: "法人番号・日経会社情報・IRを固定欄に強く反映",
+    },
+    {
+      value: "foreign",
+      label: "外資ブランド",
+      description: "公式サイト/公式採用を優先し、日本法人DBは補助扱い",
+    },
+  ];
+
+  return (
+    <div>
+      <p className="mb-1 text-xs font-semibold text-[#52525b]">企業区分</p>
+      <div className="grid gap-1 rounded-md border border-[#e4e4e7] bg-[#fafafa] p-1 sm:grid-cols-3">
+        {options.map((option) => {
+          const active = option.value === value;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onChange(option.value)}
+              className={`rounded px-2 py-2 text-left transition ${
+                active
+                  ? "bg-[#18181b] text-white"
+                  : "bg-white text-[#52525b] hover:bg-[#f4f4f5]"
+              }`}
+            >
+              <span className="block text-xs font-semibold">{option.label}</span>
+              <span
+                className={`mt-1 block text-[10px] leading-4 ${
+                  active ? "text-[#e4e4e7]" : "text-[#71717a]"
+                }`}
+              >
+                {option.description}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -1954,7 +3013,7 @@ function CompanyResearchProgress({
           </p>
           <p className="mt-1 text-xs leading-5 text-[#334155]">{step.detail}</p>
           <p className="mt-2 rounded-md bg-white px-2 py-1 text-[11px] font-semibold text-[#475569]">
-            Search: {step.searchFocus}
+            確認対象: {step.searchFocus}
           </p>
         </div>
       </div>
@@ -2021,6 +3080,20 @@ function CompanyResearchPanel({
     directEvidence.length > 0
       ? directEvidence.slice(0, 2)
       : research.evidenceDigest.slice(0, 2);
+  const companyClaims = research.companyClaims ?? [];
+  const adoptedClaims = companyClaims.filter((claim) => claim.adopted);
+  const businessClaims = adoptedClaims.filter(
+    (claim) => claim.claimType === "business_summary",
+  );
+  const roleFitClaims = adoptedClaims.filter(
+    (claim) => claim.claimType === "role_fit",
+  );
+  const claimSignals = [
+    ["確認済み", adoptedClaims.filter((claim) => claim.verification === "supported").length],
+    ["要確認", companyClaims.filter((claim) => claim.verification === "weak").length],
+    ["未確認", companyClaims.filter((claim) => claim.verification === "unverified").length],
+    ["矛盾", companyClaims.filter((claim) => claim.verification === "conflicted").length],
+  ] as const;
   const sourceSignals = [
     ["取得", fetchedCount],
     ["失敗", failedCount],
@@ -2086,6 +3159,7 @@ function CompanyResearchPanel({
               applicationTarget={{
                 industry: research.industry,
                 companyName: research.companyName,
+                corporateNumber: research.identitySummary.corporateNumber,
                 position: research.position,
                 companyMemo: research.companyUnderstandingMemo,
                 referenceUrls: primaryCompanyUrl
@@ -2128,6 +3202,47 @@ function CompanyResearchPanel({
         </p>
       )}
 
+      <div className="grid gap-4 border-t border-[#e4e4e7] px-4 py-4 xl:grid-cols-[0.9fr_1.1fr]">
+        <ResearchSection title="証拠台帳">
+          <div className="grid grid-cols-4 gap-2">
+            {claimSignals.map(([label, value]) => (
+              <div
+                key={label}
+                className="rounded-md border border-[#ececef] bg-white px-2 py-2 text-center"
+              >
+                <p className="text-[10px] font-semibold text-[#71717a]">
+                  {label}
+                </p>
+                <p className="mt-1 text-sm font-semibold text-[#18181b]">
+                  {value}
+                </p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 space-y-2">
+            {companyClaims.slice(0, 8).map((claim) => (
+              <CompanyClaimCard
+                key={claim.id}
+                claim={claim}
+                sourceLookup={sourceLookup}
+              />
+            ))}
+          </div>
+        </ResearchSection>
+
+        <ResearchSection title="出典にもとづく使える材料">
+          <div className="space-y-2">
+            {leadEvidence.map((item) => (
+              <EvidenceDigestCard
+                key={`${item.category}-${item.title}`}
+                item={item}
+                sourceLookup={sourceLookup}
+              />
+            ))}
+          </div>
+        </ResearchSection>
+      </div>
+
       <div className="grid gap-4 px-4 py-4 xl:grid-cols-[0.9fr_1.1fr]">
         <ResearchSection title="ESレビューで見る観点">
           <div className="space-y-2">
@@ -2142,15 +3257,18 @@ function CompanyResearchPanel({
           </div>
         </ResearchSection>
 
-        <ResearchSection title="出典にもとづく使える材料">
+        <ResearchSection title="Claimから作るES論点">
           <div className="space-y-2">
-            {leadEvidence.map((item) => (
-              <EvidenceDigestCard
-                key={`${item.category}-${item.title}`}
-                item={item}
-                sourceLookup={sourceLookup}
-              />
-            ))}
+            {[...businessClaims, ...roleFitClaims]
+              .slice(0, 4)
+              .map((claim) => (
+                <p
+                  key={claim.id}
+                  className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs leading-5 text-[#3f3f46]"
+                >
+                  {claim.text}
+                </p>
+              ))}
           </div>
         </ResearchSection>
       </div>
@@ -2171,7 +3289,10 @@ function CompanyResearchPanel({
 
         <ResearchSection title="事業説明">
           <div className="space-y-2">
-            {research.businessSummary.map((item) => (
+            {(businessClaims.length > 0
+              ? businessClaims.map((claim) => claim.text)
+              : research.businessSummary
+            ).map((item) => (
               <p
                 key={item}
                 className="rounded-md border border-[#ececef] bg-white px-3 py-2 text-xs leading-5"
@@ -2348,6 +3469,73 @@ function ResearchInfo({ label, value }: { label: string; value: string }) {
   );
 }
 
+function CompanyClaimCard({
+  claim,
+  sourceLookup,
+}: {
+  claim: CompanyResearchResponse["companyClaims"][number];
+  sourceLookup: Map<string, CompanyResearchSource>;
+}) {
+  const sourceNames = claim.sourceIds
+    .map((sourceId) => getSourceDisplayName(sourceId, sourceLookup))
+    .filter(Boolean);
+
+  return (
+    <div className="rounded-md border border-[#ececef] bg-white px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold text-[#18181b]">
+            {claim.label}
+          </span>
+          <span
+            className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${getClaimVerificationClassName(
+              claim.verification,
+            )}`}
+          >
+            {getClaimVerificationLabel(claim.verification)}
+          </span>
+        </div>
+        <span className="text-[10px] font-semibold text-[#71717a]">
+          {claim.confidence}
+        </span>
+      </div>
+      <p className="mt-1 text-xs leading-5 text-[#3f3f46]">{claim.text}</p>
+      <p className="mt-1 text-[11px] leading-5 text-[#71717a]">
+        出典: {sourceNames.length > 0 ? sourceNames.join(" / ") : "未確認"}
+      </p>
+      {claim.note && (
+        <p className="mt-1 text-[11px] leading-5 text-[#71717a]">
+          {claim.note}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function getClaimVerificationLabel(
+  verification: CompanyResearchResponse["companyClaims"][number]["verification"],
+) {
+  const labels = {
+    supported: "確認済み",
+    weak: "要確認",
+    unverified: "未確認",
+    conflicted: "矛盾あり",
+  };
+  return labels[verification];
+}
+
+function getClaimVerificationClassName(
+  verification: CompanyResearchResponse["companyClaims"][number]["verification"],
+) {
+  const classNames = {
+    supported: "bg-[#e7f5ea] text-[#14532d]",
+    weak: "bg-[#fff8e1] text-[#7c4a03]",
+    unverified: "bg-[#f4f4f5] text-[#52525b]",
+    conflicted: "bg-[#fee2e2] text-[#991b1b]",
+  };
+  return classNames[verification];
+}
+
 function EvidenceDigestCard({
   item,
   sourceLookup,
@@ -2464,6 +3652,10 @@ function ReviewPage({
   acceptedCompanyResearch: CompanyResearchResponse | null;
   onSelectAudit: (item: EvidenceAuditItem) => void;
 }) {
+  const [expandedCriterion, setExpandedCriterion] = useState<
+    ReviewCriterion | "none" | null
+  >(null);
+
   if (reviewError) {
     return (
       <PageBody>
@@ -2484,6 +3676,13 @@ function ReviewPage({
   }
 
   const reviewTarget = reviewRequest?.applicationTarget;
+  const activeExpandedCriterion =
+    expandedCriterion === "none"
+      ? null
+      : expandedCriterion ?? reviewResponse.criterionReviews[0]?.criterion ?? null;
+  const activeCriterionReview = reviewResponse.criterionReviews.find(
+    (criterion) => criterion.criterion === activeExpandedCriterion,
+  );
 
   return (
     <PageBody>
@@ -2494,21 +3693,64 @@ function ReviewPage({
       />
 
       <div className="grid gap-6">
-        <section className="grid gap-3 lg:grid-cols-5">
-          {reviewResponse.criterionReviews.map((criterion) => (
-            <div key={criterion.criterion} className="border-l border-[#e4e4e7] pl-3">
-              <p className="text-xs font-semibold text-[#71717a]">
-                {criterionLabel(criterion.criterion)}
-              </p>
-              <p className="mt-2 text-sm font-semibold">
-                {renderStars(criterion.starRating)}
-              </p>
-              <p className="mt-2 text-xs leading-5 text-[#71717a]">
-                {criterion.comment}
-              </p>
-            </div>
-          ))}
+        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          {reviewResponse.criterionReviews.map((criterion) => {
+            const isExpanded = activeExpandedCriterion === criterion.criterion;
+            return (
+              <button
+                key={criterion.criterion}
+                type="button"
+                className={`rounded-md border bg-white p-3 text-left transition hover:-translate-y-0.5 hover:border-[#93c5fd] hover:shadow-sm ${
+                  isExpanded ? "border-[#2563eb] shadow-sm ring-2 ring-[#dbeafe]" : "border-[#e4e4e7]"
+                }`}
+                onClick={() =>
+                  setExpandedCriterion(isExpanded ? "none" : criterion.criterion)
+                }
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-semibold text-[#71717a]">
+                      {criterionLabel(criterion.criterion)}
+                    </p>
+                    <p className="mt-1 text-sm font-semibold">
+                      {renderStars(criterion.starRating)}
+                    </p>
+                  </div>
+                  <span className="inline-flex items-center gap-1 rounded-md bg-[#f4f4f5] px-2 py-1 text-[11px] font-semibold text-[#52525b]">
+                    {criterion.evidence.length}件
+                    {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  </span>
+                </div>
+                <p className="mt-2 line-clamp-2 text-xs leading-5 text-[#52525b]">
+                  {criterion.comment}
+                </p>
+                {criterion.deductionReason && (
+                  <p className="mt-2 rounded-md bg-[#fff7ed] px-2 py-1.5 text-[11px] leading-5 text-[#9a3412]">
+                    {truncateText(criterion.deductionReason, 56)}
+                  </p>
+                )}
+              </button>
+            );
+          })}
         </section>
+        {activeCriterionReview && (
+          <section className="rounded-md border border-[#93c5fd] bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[#2563eb]">
+                  詳細診断 / {criterionLabel(activeCriterionReview.criterion)}
+                </p>
+                <h3 className="mt-1 text-base font-semibold">
+                  {activeCriterionReview.comment}
+                </h3>
+              </div>
+              <span className="rounded-md bg-[#eff6ff] px-2 py-1 text-xs font-semibold text-[#1d4ed8]">
+                根拠 {activeCriterionReview.evidence.length}件
+              </span>
+            </div>
+            <CriterionDetail criterion={activeCriterionReview} />
+          </section>
+        )}
 
         <section className="rounded-md border border-[#e4e4e7] bg-[#fafafa] p-4">
           <SectionHeader title="企業理解" icon={SearchCheck} />
@@ -2753,6 +3995,101 @@ function ReviewPage({
   );
 }
 
+function CriterionDetail({
+  criterion,
+}: {
+  criterion: ReviewResponse["criterionReviews"][number];
+}) {
+  const targetText =
+    criterion.targetText || criterion.evidence[0]?.quotedOrParaphrasedEvidence || "";
+  const evidenceReasoning =
+    criterion.evidenceReasoning ||
+    "ES本文、企業調査、本人文脈、参考ESベンチマークのうち確認できる根拠を照合して評価しています。";
+  const deductionReason =
+    criterion.deductionReason ||
+    criterion.weaknesses.join("。") ||
+    "満点にするには、本文中の根拠と企業・職種情報の接続をもう一段明確にする必要があります。";
+  const revisionDirection =
+    criterion.revisionDirection ||
+    "対象文を、本人の行動、企業固有の論点、入社後の貢献が同じ流れで読めるように直します。";
+
+  return (
+    <div className="mt-4 grid gap-3 border-t border-[#ececef] pt-4">
+      <CriterionDetailBlock label="対象文" value={targetText} tone="quote" />
+      <div className="grid gap-3 xl:grid-cols-3">
+        <CriterionDetailBlock label="評価理由" value={criterion.ratingRationale} />
+        <CriterionDetailBlock label="減点理由" value={deductionReason} tone="warning" />
+        <CriterionDetailBlock label="修正方向" value={revisionDirection} tone="action" />
+      </div>
+      <CriterionDetailBlock label="根拠の読み方" value={evidenceReasoning} />
+      <div className="grid gap-2 md:grid-cols-2">
+        <CriterionListBlock label="良い点" items={criterion.strengths} />
+        <CriterionListBlock label="弱い点" items={criterion.weaknesses} />
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        {criterion.evidence.slice(0, 4).map((evidence, index) => (
+          <p
+            key={`${criterion.criterion}-${evidence.sourceId ?? index}`}
+            className="rounded-md border border-[#ececef] bg-[#fafafa] px-2 py-1.5 text-[11px] leading-5 text-[#52525b]"
+          >
+            <span className="font-semibold">
+              {getSourceQualityLabel(evidence.sourceQuality)}:
+            </span>{" "}
+            {evidence.quotedOrParaphrasedEvidence}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CriterionDetailBlock({
+  label,
+  value,
+  tone = "plain",
+}: {
+  label: string;
+  value: string;
+  tone?: "plain" | "quote" | "warning" | "action";
+}) {
+  if (!value) return null;
+
+  const toneClass =
+    tone === "quote"
+      ? "border border-[#dbeafe] bg-[#eff6ff] text-[#1e3a8a]"
+      : tone === "warning"
+        ? "border border-[#fed7aa] bg-[#fff7ed] text-[#9a3412]"
+        : tone === "action"
+          ? "border border-[#bbf7d0] bg-[#f0fdf4] text-[#14532d]"
+          : "bg-[#fafafa] text-[#3f3f46]";
+
+  return (
+    <div>
+      <p className="text-[11px] font-semibold text-[#71717a]">{label}</p>
+      <p
+        className={`mt-1 rounded-md px-3 py-2 text-xs leading-5 ${toneClass}`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function CriterionListBlock({ label, items }: { label: string; items: string[] }) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-[#ececef] p-3">
+      <p className="text-[11px] font-semibold text-[#71717a]">{label}</p>
+      <ul className="mt-2 space-y-1 text-xs leading-5 text-[#3f3f46]">
+        {items.map((item) => (
+          <li key={item}>・{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function SuggestionsPage({
   reviewResponse,
   suggestionStatuses,
@@ -2762,54 +4099,67 @@ function SuggestionsPage({
   suggestionStatuses: Record<string, SuggestionStatus>;
   onSelectSuggestion: (item: Suggestion) => void;
 }) {
+  function getEvidenceSummary(suggestion: Suggestion) {
+    const officialCount = suggestion.evidence.filter((evidence) =>
+      ["official", "company_provided"].includes(evidence.sourceQuality),
+    ).length;
+    if (officialCount > 0) return `公式系 ${officialCount}件`;
+    if (suggestion.evidence.length > 0) return `${suggestion.evidence.length}件`;
+    return "要確認";
+  }
+
   return (
     <PageBody>
       <PageHeader
         label="改善提案"
         title="改善提案"
-        description="提案を選ぶと右側に差分、根拠、議論、操作が表示されます。"
+        description="直すべき一文、置換案、根拠を先に確認できます。提案を選ぶと右側で採用・編集できます。"
       />
-      <div className="overflow-hidden rounded-md border border-[#e4e4e7]">
-        <table className="w-full border-collapse text-sm">
-          <thead className="bg-[#fafafa] text-left text-xs text-[#71717a]">
-            <tr>
-              <th className="px-3 py-2">提案</th>
-              <th className="px-3 py-2">観点</th>
-              <th className="px-3 py-2">優先度</th>
-              <th className="px-3 py-2">状態</th>
-              <th className="px-3 py-2">根拠</th>
-            </tr>
-          </thead>
-          <tbody>
-            {reviewResponse.suggestions.map((suggestion) => (
-              <tr
-                key={suggestion.id}
-                className="border-t border-[#ececef] hover:bg-[#fafafa]"
-              >
-                <td className="px-3 py-3">
-                  <button
-                    type="button"
-                    onClick={() => onSelectSuggestion(suggestion)}
-                    className="block w-full text-left outline-none focus-visible:ring-2 focus-visible:ring-[#18181b]"
-                  >
-                    <span className="block font-semibold underline-offset-4 hover:underline">
-                      {suggestion.title}
-                    </span>
-                    <span className="mt-1 block text-xs leading-5 text-[#71717a]">
-                      {suggestion.problem}
-                    </span>
-                  </button>
-                </td>
-                <td className="px-3 py-3">{getSuggestionTypeLabel(suggestion.type)}</td>
-                <td className="px-3 py-3">{getSuggestionSeverityLabel(suggestion.severity)}</td>
-                <td className="px-3 py-3">
+      <div className="grid gap-3 xl:grid-cols-2">
+        {reviewResponse.suggestions.map((suggestion) => (
+          <button
+            key={suggestion.id}
+            type="button"
+            onClick={() => onSelectSuggestion(suggestion)}
+            className="rounded-md border border-[#e4e4e7] bg-white p-4 text-left transition hover:-translate-y-0.5 hover:border-[#93c5fd] hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#18181b]"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="text-xs font-semibold text-[#71717a]">
+                  {getSuggestionTypeLabel(suggestion.type)} / {getSuggestionSeverityLabel(suggestion.severity)}
+                </p>
+                <h3 className="mt-1 text-sm font-semibold">{suggestion.title}</h3>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <span className="rounded-md bg-[#f4f4f5] px-2 py-1 text-[11px] font-semibold text-[#52525b]">
                   {getSuggestionStatusLabel(suggestionStatuses[suggestion.id])}
-                </td>
-                <td className="px-3 py-3">{suggestion.evidence.length}件</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </span>
+                <span
+                  className={`rounded-md px-2 py-1 text-[11px] font-semibold ${
+                    suggestion.evidence.length > 0
+                      ? "bg-[#e7f5ea] text-[#14532d]"
+                      : "bg-[#fff8e1] text-[#7c4a03]"
+                  }`}
+                >
+                  根拠 {getEvidenceSummary(suggestion)}
+                </span>
+              </div>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-[#71717a]">
+              {suggestion.problem}
+            </p>
+            <div className="mt-3 grid gap-2">
+              <p className="rounded-md border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-xs leading-5 text-[#9a3412]">
+                <span className="font-semibold">修正前: </span>
+                {truncateText(suggestion.diffHint.before, 90)}
+              </p>
+              <p className="rounded-md border border-[#bbf7d0] bg-[#f0fdf4] px-3 py-2 text-xs leading-5 text-[#14532d]">
+                <span className="font-semibold">修正案: </span>
+                {truncateText(suggestion.diffHint.after, 110)}
+              </p>
+            </div>
+          </button>
+        ))}
       </div>
     </PageBody>
   );
@@ -2828,6 +4178,21 @@ function FinalPage({
   acceptedCount: number;
   openCount: number;
 }) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function copyFinalDraft() {
+    if (!finalDraft.trim()) return;
+
+    try {
+      await copyTextToClipboard(finalDraft);
+      setCopyStatus("copied");
+      window.setTimeout(() => setCopyStatus("idle"), 1800);
+    } catch {
+      setCopyStatus("failed");
+      window.setTimeout(() => setCopyStatus("idle"), 2200);
+    }
+  }
+
   return (
     <PageBody>
       <PageHeader
@@ -2845,13 +4210,47 @@ function FinalPage({
           <Metric label="文字数" value={`${finalDraft.length}/${targetCount}字`} />
           <Metric label="反映済み" value={`${acceptedCount}`} />
           <Metric label="未処理" value={`${openCount}`} />
-          <button className="w-full rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white">
-            最終稿をコピー
+          <button
+            type="button"
+            onClick={copyFinalDraft}
+            disabled={!finalDraft.trim()}
+            className="w-full rounded-md bg-[#18181b] px-3 py-2 text-sm font-semibold text-white hover:bg-[#27272a] disabled:cursor-not-allowed disabled:bg-[#8b948f]"
+          >
+            {copyStatus === "copied"
+              ? "コピーしました"
+              : copyStatus === "failed"
+                ? "コピーに失敗"
+                : "最終稿をコピー"}
           </button>
         </aside>
       </div>
     </PageBody>
   );
+}
+
+async function copyTextToClipboard(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall back to the textarea path below when browser permissions reject Clipboard API.
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error("Copy command failed");
 }
 
 function DetailDrawer({
@@ -2980,10 +4379,90 @@ function SuggestionDrawer({
           {getSuggestionTypeLabel(suggestion.type)} / {getSuggestionSeverityLabel(suggestion.severity)}
         </p>
         <h2 className="mt-2 text-base font-semibold">{suggestion.title}</h2>
-        <p className="mt-2 text-sm leading-6 text-[#71717a]">{suggestion.rationale}</p>
+        <p className="mt-2 rounded-md border border-[#fed7aa] bg-[#fff7ed] px-3 py-2 text-sm leading-6 text-[#9a3412]">
+          {suggestion.problem}
+        </p>
+        <p className="mt-2 text-sm leading-6 text-[#52525b]">{suggestion.rationale}</p>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Metric label="改善効果" value={suggestion.expectedImpact} />
+        <Metric
+          label="根拠数"
+          value={
+            suggestion.evidence.length > 0
+              ? `${suggestion.evidence.length}件`
+              : "要確認"
+          }
+        />
       </div>
       <DiffBlock label="修正前" tone="remove" text={suggestion.diffHint.before} />
       <DiffBlock label="修正案" tone="add" text={suggestion.diffHint.after} />
+      <div>
+        <p className="mb-2 text-xs font-semibold text-[#71717a]">
+          この提案の根拠
+        </p>
+        {suggestion.evidence.length > 0 ? (
+          <div className="space-y-2">
+            {suggestion.evidence.map((evidence, index) => (
+              <div
+                key={`${evidence.sourceId ?? evidence.sourceTitle}-${index}`}
+                className="rounded-md border border-[#e4e4e7] bg-white p-3 text-sm"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-semibold">
+                    {evidence.sourceTitle || "根拠ソース"}
+                  </p>
+                  <span
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                      evidence.supportsClaim
+                        ? "bg-[#e7f5ea] text-[#14532d]"
+                        : "bg-[#fff8e1] text-[#7c4a03]"
+                    }`}
+                  >
+                    {evidence.supportsClaim ? "支持" : "要確認"} /{" "}
+                    {getSourceQualityLabel(evidence.sourceQuality)}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-[#71717a]">
+                  {evidence.quotedOrParaphrasedEvidence}
+                </p>
+                {evidence.url && (
+                  <a
+                    href={evidence.url}
+                    className="mt-2 inline-flex items-center gap-1 text-xs font-semibold underline"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <Link2 size={12} />
+                    出典を開く
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]">
+            この提案にはまだ出典が紐づいていません。採用前に企業調査または本人情報で確認してください。
+          </p>
+        )}
+      </div>
+      {suggestion.userConfirmationNeeded.length > 0 && (
+        <div>
+          <p className="mb-2 text-xs font-semibold text-[#71717a]">
+            採用前に確認すること
+          </p>
+          <div className="space-y-2">
+            {suggestion.userConfirmationNeeded.map((item) => (
+              <p
+                key={item}
+                className="rounded-md border border-[#f0c36a] bg-[#fff8e1] px-3 py-2 text-xs leading-5 text-[#7c4a03]"
+              >
+                {item}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
       <div>
         <p className="mb-2 text-xs font-semibold text-[#71717a]">
           反映前に調整
@@ -3085,16 +4564,19 @@ function Field({
   label,
   value,
   onChange,
+  placeholder,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  placeholder?: string;
 }) {
   return (
     <label className="grid gap-1.5 text-xs">
       <span className="font-medium text-[#71717a]">{label}</span>
       <input
         value={value}
+        placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
         className="rounded-md border border-[#e4e4e7] bg-white px-2.5 py-2 text-sm outline-none focus:border-[#18181b]"
       />
@@ -3239,6 +4721,11 @@ function EmptyState({ title, description }: { title: string; description: string
       </div>
     </div>
   );
+}
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1)}…`;
 }
 
 function renderStars(rating: number) {

@@ -18,6 +18,8 @@ const friendlyMessages: Record<string, string> = {
     "OpenAI APIリクエストに失敗しました。入力内容、モデル名、API設定を確認してください。",
   company_research_timeout:
     "企業情報のAI調査がタイムアウトしました。参考URLを減らすか、少し待って再実行してください。",
+  benchmark_research_timeout:
+    "参考ESベンチマークの生成がタイムアウトしました。少し待ってから再実行してください。",
   openai_timeout:
     "AIレビューがタイムアウトしました。ES本文や参考情報を短くして再実行してください。",
   discussion_timeout:
