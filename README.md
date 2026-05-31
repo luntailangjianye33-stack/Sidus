@@ -198,6 +198,19 @@ npm run smoke:api
 10. 提案を採用または編集反映する
 11. 最終稿で文面を確認し、コピーまたは保存する
 
+## 補足資料
+
+設計コンセプト、市場分析、稼働手順、設計履歴は `SUBMISSION_MANUAL.md` にまとめています。
+
+詳細な事前調査資料は `docs/research/` に格納しています。
+
+- `docs/research/market_analysis_layerx_es_review_tool.md`
+  - ES添削AI市場、既存プロダクト、差別化仮説
+- `docs/research/design_reference_oss_research.md`
+  - OSS UI、source-backed UI、diff review UI の参照調査
+- `docs/research/evidence_research_multi_agent_verification.md`
+  - claim単位検証、出典照合、multi-agent verification の調査
+
 ## 既知の制約
 
 - 外部情報取得は、対象サイトのHTML構造やアクセス可否に依存します。
